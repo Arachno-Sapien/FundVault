@@ -1,0 +1,28 @@
+# Development databases only. Production uses managed Postgres (Render for the
+# control plane, the org's own provider for each tenant).
+services:
+  controlplane:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fundvault
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: fundvault_control
+    ports:
+      - "5433:5432"
+    volumes:
+      - controlplane_data:/var/lib/postgresql/data
+
+  tenant_dev:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fundvault
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: fundvault_tenant_dev
+    ports:
+      - "5434:5432"
+    volumes:
+      - tenant_dev_data:/var/lib/postgresql/data
+
+volumes:
+  controlplane_data:
+  tenant_dev_data:
