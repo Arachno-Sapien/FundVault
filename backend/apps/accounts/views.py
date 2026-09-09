@@ -4,7 +4,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
-from apps.accounts.models import Session, User, ensure_profile_schema
+from apps.accounts.models import Session, User
 from apps.accounts.serializers import serialize_user
 from apps.common.audit import add_audit
 from apps.common.auth import admin_required, auth_required, create_session, create_session_token
@@ -36,7 +36,6 @@ def signup(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
 
-    ensure_profile_schema()
     payload = parse_body(request)
     username = str(payload.get("username", "")).strip()
     email = str(payload.get("email", "")).strip().lower()
@@ -74,7 +73,6 @@ def login(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
 
-    ensure_profile_schema()
     payload = parse_body(request)
     username_or_email = str(payload.get("username", "")).strip()
     password = str(payload.get("password", ""))

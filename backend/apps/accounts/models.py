@@ -1,4 +1,4 @@
-from django.db import models, connection
+from django.db import models
 from django.utils import timezone
 
 
@@ -24,24 +24,6 @@ class User(models.Model):
     @property
     def is_authenticated(self):
         return True
-
-
-_profile_schema_checked = False
-
-
-def ensure_profile_schema():
-    global _profile_schema_checked
-    if _profile_schema_checked:
-        return
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-        if not cursor.fetchone():
-            return
-        cursor.execute("PRAGMA table_info(users)")
-        columns = {row[1] for row in cursor.fetchall()}
-        if "profile_image" not in columns:
-            cursor.execute("ALTER TABLE users ADD COLUMN profile_image TEXT")
-    _profile_schema_checked = True
 
 
 class Session(models.Model):

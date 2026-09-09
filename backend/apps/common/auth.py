@@ -6,7 +6,7 @@ import jwt
 from django.conf import settings
 from django.utils import timezone
 
-from apps.accounts.models import Session, User, ensure_profile_schema
+from apps.accounts.models import Session, User
 from apps.common.utils import json_error
 from apps.common.utils import uid
 
@@ -37,7 +37,6 @@ def auth_required(view_func):
     @wraps(view_func)
     def wrapped(request, *args, **kwargs):
         _clean_expired_sessions()
-        ensure_profile_schema()
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return json_error("No token provided", 401)
