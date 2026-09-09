@@ -23,7 +23,7 @@ that separate ledgers no longer require separate codebases.
 | Where tenant data lives | Each org supplies its own Postgres (BYO database) |
 | Supported services | Postgres-compatible only — Supabase, Neon, Railway, any `postgres://` |
 | Identity | Users live in the tenant DB; control plane keeps an email→org index |
-| Permissions | Org-wide funds, roles Owner/Admin/Member |
+| Permissions | Org-wide funds, roles Owner/Admin/Member/Viewer |
 | Approval rule | Applies only to Member-created transactions; any Admin may approve, including their own |
 | Receipts | Org's own object storage, private bucket, signed URLs on read |
 | AI providers | Per-org: OpenAI-compatible (base URL + model + key) or Gemini |
@@ -59,7 +59,7 @@ belong to. It holds no password data.
 **Tenant DB** — the org's own Postgres. The existing seven tables, with four
 changes:
 
-- `users.role` gains `owner` alongside `admin` and `member`
+- `users.role` gains `owner` and `viewer` alongside `admin` and `member`
 - `databases.user_id` becomes `created_by`; funds belong to the org, and
   `_get_user_database()` drops its `user_id` filter
 - `transactions.receipt_image` (base64 TEXT) becomes `receipt_key` (TEXT)
@@ -72,24 +72,40 @@ read time.
 
 **Roles.** Every member of an org holds exactly one:
 
-| Capability | Owner | Admin | Member |
-|---|---|---|---|
-| View all funds and transactions | ✓ | ✓ | ✓ |
-| Create transactions | ✓ | ✓ | ✓ |
-| Transaction requires approval when over threshold | — | — | ✓ |
-| Approve transactions (including own) | ✓ | ✓ | — |
-| Void / edit / delete transactions | ✓ | ✓ | — |
-| Create, edit, archive, delete funds | ✓ | ✓ | — |
-| Mint Member join codes · manage members | ✓ | ✓ | — |
-| Mint Admin join codes | ✓ | — | — |
-| Change role of a member | ✓ | — | — |
-| Set database connection, storage, AI config | ✓ | — | — |
-| Transfer ownership | ✓ | — | — |
+| Capability | Owner | Admin | Member | Viewer |
+|---|---|---|---|---|
+| View all funds and transactions | ✓ | ✓ | ✓ | ✓ |
+| Export / print reports and receipts | ✓ | ✓ | ✓ | ✓ |
+| Create transactions | ✓ | ✓ | ✓ | — |
+| Transaction requires approval when over threshold | — | — | ✓ | n/a |
+| Approve transactions (including own) | ✓ | ✓ | — | — |
+| Void / edit / delete transactions | ✓ | ✓ | — | — |
+| Create, edit, archive, delete funds | ✓ | ✓ | — | — |
+| Mint Member / Viewer join codes · manage members | ✓ | ✓ | — | — |
+| Mint Admin join codes | ✓ | — | — | — |
+| Change role of a member | ✓ | — | — | — |
+| Set database connection, storage, AI config | ✓ | — | — | — |
+| Transfer ownership | ✓ | — | — | — |
 
 An org always has exactly one Owner — the creator, until ownership is
 transferred. Existing guards carry over in org form: the Owner cannot be
 demoted or removed while they are the only one, mirroring today's "at least one
 active admin" rule.
+
+**Viewer** exists because read-only oversight is standard in this domain: Xero
+has a Read-only user, Zoho Books an Accountant role, QuickBooks reports-only
+access. For a fund ledger the case is stronger than for general accounting — a
+committee reviewing where money went, an auditor, an accountant handed the books
+— and the role costs one enum value now against a migration across every live
+tenant database later.
+
+**On self-approval.** Standard accounting control separates who records a
+transaction from who approves it; this design deliberately does not, because
+requiring a second Admin makes approval thresholds unusable in a small org. The
+compensating control is that `created_by` and `approved_by` are both stored, so
+a self-approval is visible in the audit log even though it is not blocked. If an
+org later wants strict separation, it becomes a per-org toggle on the approval
+check rather than a redesign.
 
 **There is no `org_id` column anywhere.** The database is the tenant boundary,
 so the classic multi-tenant failure — a query missing its `WHERE org_id = ?` —
@@ -111,8 +127,8 @@ configurable later.
 browser is shown only the org's name — the connection string is never sent to
 the client in any form. The normal signup form follows, creating the user row in
 the tenant DB with the role the code grants. Codes carry `grants_role`, an
-expiry, a max-use count, and a revoked flag. Admins mint Member codes; only the
-Owner mints Admin codes.
+expiry, a max-use count, and a revoked flag. Admins mint Member and Viewer
+codes; only the Owner mints Admin codes.
 
 Creating an org and joining one both write an `email_index` row, which is what
 makes the org appear at that person's next login. Removing a member deletes
