@@ -44,6 +44,11 @@ def _parse_database_url(url):
         "CONN_MAX_AGE": 60,
         "CONN_HEALTH_CHECKS": True,
         "OPTIONS": {},
+        # These are independent physical servers, not migration-order dependent;
+        # without this, a TransactionTestCase.databases set that omits "default"
+        # (e.g. a tenant-only test) hits Django's implicit dependency on
+        # "default" and fails with "Circular dependency in TEST[DEPENDENCIES]".
+        "TEST": {"DEPENDENCIES": []},
     }
 
 

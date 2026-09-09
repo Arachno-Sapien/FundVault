@@ -242,13 +242,23 @@ def database_transactions(request, database_id):
         return json_error("Amount must be greater than 0", 400)
     if tx_date is None:
         return json_error("Transaction date is required", 400)
-    if tx_type == "debit" and amount > db.balance:
-        return json_error("Insufficient balance", 400)
-
-    requires_approval = db.approval_threshold > 0 and amount >= db.approval_threshold
-    new_balance = db.balance if requires_approval else (db.balance + amount if tx_type == "credit" else db.balance - amount)
-
     with transaction.atomic():
+        # Re-read the fund under a row lock: the balance read above happened
+        # outside any transaction and another request may have moved it.
+        locked = DatabaseFund.objects.select_for_update().filter(id=database_id).first()
+        if not locked:
+            return json_error("Database not found", 404)
+
+        if tx_type == "debit" and amount > locked.balance:
+            return json_error("Insufficient balance", 400)
+
+        requires_approval = locked.approval_threshold > 0 and amount >= locked.approval_threshold
+        new_balance = (
+            locked.balance
+            if requires_approval
+            else (locked.balance + amount if tx_type == "credit" else locked.balance - amount)
+        )
+
         txn = TransactionFund.objects.create(
             id=uid(),
             database_id=database_id,
@@ -263,13 +273,13 @@ def database_transactions(request, database_id):
             notes=notes or None,
             running_balance=new_balance,
             receipt_key=None,
-            created_by_id=request.fv_user.id,
             requires_approval=requires_approval,
             approved=(not requires_approval),
+            created_by_id=request.fv_user.id,
         )
         if not requires_approval:
-            db.balance = new_balance
-            db.save(update_fields=["balance"])
+            locked.balance = new_balance
+            locked.save(update_fields=["balance"])
 
     add_audit(
         request.fv_user.id,
@@ -367,20 +377,25 @@ def transaction_approve(request, transaction_id):
     if not txn.requires_approval:
         return json_error("Transaction does not require approval", 400)
 
-    db = txn.database
-    if txn.type == "debit" and txn.amount > db.balance:
-        return json_error("Insufficient balance to approve this debit transaction", 400)
-
-    new_balance = db.balance + txn.amount if txn.type == "credit" else db.balance - txn.amount
     with transaction.atomic():
+        locked = DatabaseFund.objects.select_for_update().filter(id=txn.database_id).first()
+        if not locked:
+            return json_error("Database not found", 404)
+
+        if txn.type == "debit" and txn.amount > locked.balance:
+            return json_error("Insufficient balance to approve this debit transaction", 400)
+
+        new_balance = (
+            locked.balance + txn.amount if txn.type == "credit" else locked.balance - txn.amount
+        )
         txn.approved = True
         txn.approved_by = request.fv_user.username
         txn.approved_at = timezone.now()
         txn.running_balance = new_balance
         txn.save(update_fields=["approved", "approved_by", "approved_at", "running_balance"])
-        db.balance = new_balance
-        db.save(update_fields=["balance"])
-        recalculate_running_balances(db.id)
+        locked.balance = new_balance
+        locked.save(update_fields=["balance"])
+        recalculate_running_balances(locked.id)
 
     add_audit(
         request.fv_user.id,

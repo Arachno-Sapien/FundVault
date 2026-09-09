@@ -53,7 +53,10 @@ def process_due_recurring(user):
     )
     created = []
     for rec in items:
-        db = rec.database
+        # Re-read the fund under a row lock: rec.database came from an
+        # unlocked select_related() prefetch, so a concurrent debit/approval
+        # could move the balance between that read and this write.
+        db = DatabaseFund.objects.select_for_update().get(id=rec.database_id)
         if rec.type == "debit" and rec.amount > db.balance:
             rec.next_run = next_recurring_date(rec.next_run, rec.frequency)
             rec.save(update_fields=["next_run"])
