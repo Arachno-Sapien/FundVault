@@ -7,4 +7,4 @@ google-genai==2.9.0
 openai==1.82.0
 Pillow==12.2.0
 python-dotenv==1.0.1
-psycopg[binary]==3.2.3
+psycopg[binary]==3.2.10
