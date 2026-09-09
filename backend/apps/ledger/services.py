@@ -48,7 +48,7 @@ def process_due_recurring(user):
     today = timezone.now().date()
     items = (
         RecurringTransaction.objects.select_related("database")
-        .filter(database__user_id=user.id, database__is_deleted=False, is_active=True, next_run__lte=today)
+        .filter(database__is_deleted=False, is_active=True, next_run__lte=today)
         .order_by("next_run", "created_at")
     )
     created = []

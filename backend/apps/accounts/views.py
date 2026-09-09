@@ -175,9 +175,9 @@ def admin_users(request):
     users = list(User.objects.all().order_by("created_at"))
     data = []
     for user in users:
-        db_count = DatabaseFund.objects.filter(user_id=user.id).count()
-        active_db_count = DatabaseFund.objects.filter(user_id=user.id, is_deleted=False).count()
-        tx_count = TransactionFund.objects.filter(database__user_id=user.id).count()
+        db_count = DatabaseFund.objects.filter(created_by_id=user.id).count()
+        active_db_count = DatabaseFund.objects.filter(created_by_id=user.id, is_deleted=False).count()
+        tx_count = TransactionFund.objects.filter(created_by_id=user.id).count()
         row = serialize_user(user)
         row["database_count"] = db_count
         row["active_database_count"] = active_db_count
@@ -242,15 +242,10 @@ def admin_user_detail(request, user_id):
             return json_error("At least one active admin account is required", 400)
 
         with transaction.atomic():
-            db_ids = list(DatabaseFund.objects.filter(user_id=target.id).values_list("id", flat=True))
-            if db_ids:
-                TransactionFund.objects.filter(database_id__in=db_ids).delete()
-            DatabaseFund.objects.filter(user_id=target.id).delete()
-            from apps.ledger.models import AuditLog, RecurringTransaction, TrashItem
+            from apps.ledger.models import AuditLog, TrashItem
 
-            RecurringTransaction.objects.filter(database_id__in=db_ids).delete()
             TrashItem.objects.filter(deleted_by_id=target.id).delete()
-            AuditLog.objects.filter(user_id=target.id).delete()
+            AuditLog.objects.filter(user_id=target.id).update(user_id=None)
             Session.objects.filter(user_id=target.id).delete()
             target.delete()
 

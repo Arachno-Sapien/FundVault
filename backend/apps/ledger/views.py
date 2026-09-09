@@ -41,7 +41,13 @@ def _parse_iso_datetime(raw):
 
 
 def _get_user_database(user, database_id, include_deleted=False):
-    query = DatabaseFund.objects.filter(id=database_id, user_id=user.id)
+    """Look up a fund within the caller's org.
+
+    The org boundary is the database connection itself, so no ownership filter
+    is applied here. The `user` parameter is retained because callers pass it
+    and Phase 4 uses it for role checks.
+    """
+    query = DatabaseFund.objects.filter(id=database_id)
     if not include_deleted:
         query = query.filter(is_deleted=False)
     return query.first()
@@ -51,7 +57,7 @@ def _get_user_database(user, database_id, include_deleted=False):
 @auth_required
 def databases_list_create(request):
     if request.method == "GET":
-        rows = DatabaseFund.objects.filter(user_id=request.fv_user.id, is_deleted=False).order_by("-created_at")
+        rows = DatabaseFund.objects.filter(is_deleted=False).order_by("-created_at")
         return JsonResponse([serialize_database(row) for row in rows], safe=False)
 
     if request.method != "POST":
@@ -67,7 +73,7 @@ def databases_list_create(request):
 
     db = DatabaseFund.objects.create(
         id=uid(),
-        user_id=request.fv_user.id,
+        created_by_id=request.fv_user.id,
         name=name,
         description=description,
         low_balance_threshold=low_balance_threshold,
@@ -100,7 +106,7 @@ def databases_merge(request):
     with transaction.atomic():
         merged = DatabaseFund.objects.create(
             id=uid(),
-            user_id=request.fv_user.id,
+            created_by_id=request.fv_user.id,
             name=merged_name,
             description=f'Merged from "{source.name}" and "{target.name}"',
             balance=0,
@@ -227,7 +233,6 @@ def database_transactions(request, database_id):
     mode_data = body.get("modeData") or {}
     location = str(body.get("location", "")).strip()
     notes = str(body.get("notes", "")).strip()
-    receipt_image = body.get("receiptImage")
 
     if tx_type not in ("credit", "debit"):
         return json_error("Invalid transaction type", 400)
@@ -257,7 +262,8 @@ def database_transactions(request, database_id):
             location=location or None,
             notes=notes or None,
             running_balance=new_balance,
-            receipt_image=receipt_image,
+            receipt_key=None,
+            created_by_id=request.fv_user.id,
             requires_approval=requires_approval,
             approved=(not requires_approval),
         )
@@ -293,7 +299,7 @@ def transaction_void(request, transaction_id):
 
     txn = (
         TransactionFund.objects.select_related("database")
-        .filter(id=transaction_id, database__user_id=request.fv_user.id, database__is_deleted=False)
+        .filter(id=transaction_id, database__is_deleted=False)
         .first()
     )
     if not txn:
@@ -322,7 +328,7 @@ def transaction_delete_voided(request, transaction_id):
 
     txn = (
         TransactionFund.objects.select_related("database")
-        .filter(id=transaction_id, database__user_id=request.fv_user.id, database__is_deleted=False)
+        .filter(id=transaction_id, database__is_deleted=False)
         .first()
     )
     if not txn:
@@ -349,7 +355,7 @@ def transaction_approve(request, transaction_id):
 
     txn = (
         TransactionFund.objects.select_related("database")
-        .filter(id=transaction_id, database__user_id=request.fv_user.id, database__is_deleted=False)
+        .filter(id=transaction_id, database__is_deleted=False)
         .first()
     )
     if not txn:
@@ -394,7 +400,7 @@ def transaction_update(request, transaction_id):
     body = parse_body(request)
     txn = (
         TransactionFund.objects.select_related("database")
-        .filter(id=transaction_id, database__user_id=request.fv_user.id, database__is_deleted=False)
+        .filter(id=transaction_id, database__is_deleted=False)
         .first()
     )
     if not txn:
@@ -440,7 +446,7 @@ def analytics_overview(request):
     if request.method != "GET":
         return json_error("Method not allowed", 405)
 
-    databases = DatabaseFund.objects.filter(user_id=request.fv_user.id, is_deleted=False)
+    databases = DatabaseFund.objects.filter(is_deleted=False)
     db_ids = list(databases.values_list("id", flat=True))
     if not db_ids:
         return JsonResponse(
@@ -499,7 +505,7 @@ def _delete_trash_item_permanently(item, user):
         db_id = data.get("id")
         RecurringTransaction.objects.filter(database_id=db_id).delete()
         TransactionFund.objects.filter(database_id=db_id).delete()
-        DatabaseFund.objects.filter(id=db_id, user_id=user.id).delete()
+        DatabaseFund.objects.filter(id=db_id).delete()
     item.delete()
 
 
@@ -514,7 +520,7 @@ def trash_restore(request, item_id):
 
     if item.entity_type == "database":
         data = json.loads(item.entity_data)
-        DatabaseFund.objects.filter(id=data.get("id"), user_id=request.fv_user.id).update(is_deleted=False)
+        DatabaseFund.objects.filter(id=data.get("id")).update(is_deleted=False)
 
     item.delete()
     add_audit(request.fv_user.id, "update", item.entity_type, item.id, "Item restored from trash")
@@ -588,7 +594,7 @@ def recurring_delete(request, recurring_id):
         return json_error("Method not allowed", 405)
     item = (
         RecurringTransaction.objects.select_related("database")
-        .filter(id=recurring_id, database__user_id=request.fv_user.id)
+        .filter(id=recurring_id)
         .first()
     )
     if not item:

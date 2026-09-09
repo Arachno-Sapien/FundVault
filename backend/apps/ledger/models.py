@@ -6,7 +6,14 @@ from apps.accounts.models import User
 
 class DatabaseFund(models.Model):
     id = models.CharField(max_length=64, primary_key=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, db_column="user_id", related_name="databases")
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        db_column="created_by",
+        related_name="created_databases",
+        null=True,
+        blank=True,
+    )
     name = models.TextField()
     description = models.TextField(null=True, blank=True)
     balance = models.FloatField(default=0)
@@ -18,7 +25,7 @@ class DatabaseFund(models.Model):
 
     class Meta:
         db_table = "databases"
-        indexes = [models.Index(fields=["user"], name="idx_databases_user")]
+        indexes = [models.Index(fields=["created_by"], name="idx_databases_creator")]
 
 
 class TransactionFund(models.Model):
@@ -43,7 +50,15 @@ class TransactionFund(models.Model):
     location = models.TextField(null=True, blank=True)
     notes = models.TextField(null=True, blank=True)
     running_balance = models.FloatField()
-    receipt_image = models.TextField(null=True, blank=True)
+    receipt_key = models.TextField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        db_column="created_by",
+        related_name="created_transactions",
+        null=True,
+        blank=True,
+    )
     requires_approval = models.BooleanField(default=False)
     approved = models.BooleanField(default=True)
     approved_by = models.TextField(null=True, blank=True)

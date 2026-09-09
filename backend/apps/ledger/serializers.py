@@ -13,7 +13,7 @@ def _parse_mode_data(mode_data):
 def serialize_database(database):
     return {
         "id": database.id,
-        "user_id": database.user_id,
+        "created_by": database.created_by_id,
         "name": database.name,
         "description": database.description or "",
         "balance": float(database.balance or 0),
@@ -39,7 +39,7 @@ def serialize_transaction(txn):
         "location": txn.location or "",
         "notes": txn.notes or "",
         "running_balance": float(txn.running_balance),
-        "receipt_image": txn.receipt_image,
+        "receipt_key": txn.receipt_key,
         "requires_approval": bool(txn.requires_approval),
         "approved": bool(txn.approved),
         "approved_by": txn.approved_by,

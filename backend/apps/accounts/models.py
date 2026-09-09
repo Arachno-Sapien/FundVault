@@ -4,8 +4,10 @@ from django.utils import timezone
 
 class User(models.Model):
     class Role(models.TextChoices):
+        OWNER = "owner", "Owner"
         ADMIN = "admin", "Admin"
         MEMBER = "member", "Member"
+        VIEWER = "viewer", "Viewer"
 
     id = models.CharField(max_length=64, primary_key=True)
     username = models.CharField(max_length=150, unique=True)
