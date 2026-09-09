@@ -1,0 +1,21 @@
+{
+  "name": "fundvault-fullstack",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FundVault Full Stack Workspace (Django + Next.js)",
+  "scripts": {
+    "dev": "concurrently -k -n BACKEND,FRONTEND -c magenta,cyan \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "python backend\\manage.py runserver 127.0.0.1:8000",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "check:backend": "python backend\\manage.py check",
+    "build:frontend": "npm --prefix frontend run build",
+    "build": "npm run check:backend && npm run build:frontend",
+    "install:all": "npm install && npm --prefix frontend install && python -m pip install -r backend\\requirements.txt"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "keywords": ["fundvault", "fullstack", "django", "nextjs", "sqlite"],
+  "author": "FundVault Team",
+  "license": "MIT"
+}

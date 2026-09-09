@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+
+# Build output
+.next/
+.dist/
+dist/
+build/
+staticfiles/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+backend/.env
+
+# Databases — never commit
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# Credentials
+*credentials*.txt
+*login*.txt
+
+# Editors / OS
+.idea/
+.vscode/
+.serena/
+.DS_Store
+*.swp
+*.swo
+
+# Logs
+*.log
+coverage/
