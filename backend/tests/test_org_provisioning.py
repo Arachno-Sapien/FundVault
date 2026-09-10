@@ -20,7 +20,7 @@ DEAD_URL = "postgres://fundvault:devpassword@127.0.0.1:9/nothing"
 # apps.orgs.provisioning.uid to hand out one of these fixed ids instead —
 # each pre-registered below, at import time, the same way those other files
 # do it.
-PROVISION_ORG_IDS = [f"provtest{i}" for i in range(1, 7)]
+PROVISION_ORG_IDS = [f"provtest{i}" for i in range(1, 8)]
 PROVISION_ALIASES = {alias_for_org(org_id) for org_id in PROVISION_ORG_IDS}
 
 
@@ -58,6 +58,77 @@ class ConnectionCheckTests(TestCase):
         self.assertEqual(set(connections.databases), before)
 
 
+class SSRFProtectionTests(TestCase):
+    """validate-connection and create are unauthenticated: an anonymous
+    caller supplies the host, so a private/loopback/link-local target must
+    be refused before any socket opens — not just fail after a real
+    connection attempt. FUNDVAULT_TENANT_HOST_ALLOWLIST (settings_test.py)
+    exempts only 127.0.0.1:5433/5434, this project's own dev Postgres
+    servers, so 127.0.0.1 on any other port still proves the guard works.
+    """
+
+    databases = {"default", "tenant_dev"}
+
+    def test_loopback_on_a_non_allowlisted_port_is_rejected(self):
+        result = check_connection("postgres://u:p@127.0.0.1:5555/db")
+        self.assertFalse(result.ok)
+        self.assertIn("cannot be used", result.message)
+
+    def test_private_range_ip_is_rejected(self):
+        result = check_connection("postgres://u:p@10.0.0.1:5432/db")
+        self.assertFalse(result.ok)
+        self.assertIn("cannot be used", result.message)
+
+    def test_another_private_range_ip_is_rejected(self):
+        result = check_connection("postgres://u:p@192.168.1.1:5432/db")
+        self.assertFalse(result.ok)
+
+    def test_cloud_metadata_ip_is_rejected(self):
+        result = check_connection("postgres://u:p@169.254.169.254:80/db")
+        self.assertFalse(result.ok)
+        self.assertIn("cannot be used", result.message)
+
+    def test_blocked_message_does_not_explain_why(self):
+        # The message must be actionable but must not teach an attacker
+        # which filter it hit.
+        result = check_connection("postgres://u:p@169.254.169.254:80/db")
+        self.assertNotIn("private", result.message.lower())
+        self.assertNotIn("internal", result.message.lower())
+        self.assertNotIn("ssrf", result.message.lower())
+
+    def test_allowlisted_dev_host_still_passes(self):
+        # Sanity check that the allowlist doesn't accidentally break the
+        # fixture every other test in this module depends on.
+        result = check_connection(TENANT_URL)
+        self.assertTrue(result.ok, result.message)
+
+    def test_provision_org_rejects_a_private_host_before_touching_anything(self):
+        with self.assertRaises(ProvisioningError):
+            provision_org("Bad Org", "postgres://u:p@10.0.0.1:5432/db", "owner@example.com")
+        self.assertEqual(Org.objects.count(), 0)
+
+    def test_validate_connection_endpoint_rejects_metadata_ip_cleanly(self):
+        response = Client().post(
+            "/api/orgs/validate-connection",
+            data=json.dumps({"databaseUrl": "postgres://u:p@169.254.169.254:80/db"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(json.loads(response.content)["ok"])
+
+    def test_create_org_endpoint_rejects_private_host_cleanly(self):
+        response = Client().post(
+            "/api/orgs/create",
+            data=json.dumps({
+                "name": "Bad", "databaseUrl": "postgres://u:p@127.0.0.1:5555/db",
+                "username": "eve", "email": "eve@example.com", "password": "hunter22",
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Org.objects.count(), 0)
+
+
 class ProvisionTests(TestCase):
     databases = {"default", "tenant_dev"} | PROVISION_ALIASES
 
@@ -88,6 +159,44 @@ class ProvisionTests(TestCase):
         first = provision_org("Acme Funds", TENANT_URL, "a@example.com")
         second = provision_org("Acme Funds", TENANT_URL, "b@example.com")
         self.assertNotEqual(first.slug, second.slug)
+
+    @mock.patch("apps.orgs.provisioning.drop_connection")
+    @mock.patch("apps.orgs.provisioning._unique_slug", return_value="acme-funds")
+    @mock.patch("apps.orgs.provisioning.uid", return_value="provtest7")
+    def test_slug_collision_race_is_a_clean_provisioning_error(self, _mock_uid, _mock_slug, mock_drop):
+        # Simulates the TOCTOU window in _unique_slug's check-then-create:
+        # another org already holds the slug _unique_slug would otherwise
+        # have avoided (mocked here to force the exact race), so
+        # Org.objects.create() hits the real unique constraint. This must
+        # surface as a clean ProvisioningError, not an uncaught
+        # IntegrityError — with DJANGO_DEBUG defaulting true, an uncaught
+        # IntegrityError would crash into Django's debug page and dump this
+        # call's own `url` argument (with its password) into the traceback.
+        #
+        # drop_connection is mocked here (not left to run for real): "org_
+        # provtest7" is one of this TestCase's Django-declared `databases`,
+        # which Django's own TestCase machinery wraps in an atomic block and
+        # rolls back at teardown — actually closing and deregistering that
+        # connection mid-test (as the real cleanup does) fights that
+        # teardown. Asserting it was called still proves provision_org
+        # cleans up on this path, matching the existing migrate-failure path.
+        Org.objects.create(
+            id="existing-org",
+            name="Acme Funds",
+            slug="acme-funds",
+            owner_email="first@example.com",
+            db_connection=TENANT_URL,
+        )
+
+        with self.assertRaises(ProvisioningError) as ctx:
+            provision_org("Acme Funds", TENANT_URL, "second@example.com")
+
+        self.assertNotIn(TENANT_URL, str(ctx.exception))
+        self.assertNotIn("devpassword", str(ctx.exception))
+        mock_drop.assert_called_once_with(alias_for_org("provtest7"))
+        # Only the pre-existing org remains; the loser left no row behind,
+        # and the connection is still usable for this very assertion.
+        self.assertEqual(Org.objects.count(), 1)
 
 
 class CreateOrgEndpointTests(TestCase):

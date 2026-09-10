@@ -22,3 +22,12 @@ FUNDVAULT_SECRET_KEY = "cP7mHqLxKcVfJhTgYnWzRbNdSaQeUiOpAsDfGhJkLmM="
 DATABASES["tenant_dev_b"] = _parse_database_url(
     "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev_orgb"
 )
+
+# apps.orgs.provisioning's SSRF guard blocks private/loopback addresses by
+# default (see FUNDVAULT_TENANT_HOST_ALLOWLIST in settings.py), but this
+# project's local dev Postgres servers legitimately run on loopback and
+# test_org_provisioning.py's TENANT_URL fixture connects to one of them.
+# Exempting only these two exact (host, port) pairs keeps the guard's real
+# behaviour under test: 127.0.0.1 on any other port, other private ranges,
+# and the cloud metadata IP are still rejected.
+FUNDVAULT_TENANT_HOST_ALLOWLIST = frozenset({("127.0.0.1", 5433), ("127.0.0.1", 5434)})

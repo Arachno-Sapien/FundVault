@@ -6,16 +6,60 @@ leaves no org row, so there is never a half-created org whose database is in
 an unknown state.
 """
 
+import ipaddress
+import socket
 from dataclasses import dataclass
 
 import psycopg
+from django.conf import settings
 from django.core.management import call_command
-from django.db import connections
+from django.db import IntegrityError, connections, transaction
 from django.utils.text import slugify
 
 from apps.common.utils import uid
 from apps.orgs.connections import alias_for_org, build_config, drop_connection
 from apps.orgs.models import Org
+
+_BLOCKED_TARGET_MESSAGE = "That host cannot be used for a tenant database connection."
+
+
+def _is_internal_address(ip_str):
+    """RFC1918/loopback/link-local (incl. the cloud metadata IP)/multicast/reserved."""
+    ip = ipaddress.ip_address(ip_str)
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _blocked_target_message(host, port):
+    """Refuse to probe an internal/private address for either public endpoint.
+
+    Both `validate-connection` and `create` are unauthenticated self-service
+    signup — an anonymous caller supplies the host. Without this, they could
+    point the probe at 127.0.0.1, the cloud metadata IP (169.254.169.254), or
+    any other internal-only address and read the (already-scrubbed) result as
+    a port-scan oracle. Returns None when the target is fine to probe, else a
+    generic message safe to hand back to the caller.
+
+    `FUNDVAULT_TENANT_HOST_ALLOWLIST` is a narrow, exact (host, port)
+    allowlist for local dev/test Postgres servers, which legitimately run on
+    loopback — everything else at a private/loopback/link-local/reserved
+    address is still blocked.
+    """
+    if (host, port) in getattr(settings, "FUNDVAULT_TENANT_HOST_ALLOWLIST", frozenset()):
+        return None
+    try:
+        addrs = {info[4][0] for info in socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)}
+    except socket.gaierror:
+        return None  # let the real connection attempt fail with its own message
+    if any(_is_internal_address(addr) for addr in addrs):
+        return _BLOCKED_TARGET_MESSAGE
+    return None
 
 
 class ProvisioningError(Exception):
@@ -75,6 +119,10 @@ def check_connection(url):
         # malformed URL always produces a clean result, never a 500.
         return ConnectionCheck(ok=False, message=str(exc))
 
+    blocked = _blocked_target_message(config["HOST"], int(config["PORT"]))
+    if blocked:
+        return ConnectionCheck(ok=False, message=blocked)
+
     try:
         with psycopg.connect(
             host=config["HOST"],
@@ -116,10 +164,31 @@ def provision_org(name, url, owner_email):
         drop_connection(alias)
         raise ProvisioningError(f"Could not build the schema: {_friendly(exc)}")
 
-    return Org.objects.create(
-        id=org_id,
-        name=name,
-        slug=_unique_slug(name, org_id),
-        owner_email=owner_email,
-        db_connection=url,
-    )
+    try:
+        # The create runs in its own savepoint (matching the pattern in
+        # apps.accounts.views) so that catching IntegrityError below rolls
+        # back only this insert, not whatever transaction the caller is
+        # already inside — leaving "default" usable for the ProvisioningError
+        # path's own queries, and for the caller's, afterwards.
+        with transaction.atomic():
+            return Org.objects.create(
+                id=org_id,
+                name=name,
+                slug=_unique_slug(name, org_id),
+                owner_email=owner_email,
+                db_connection=url,
+            )
+    except IntegrityError:
+        # _unique_slug's check-then-create has a race: two concurrent calls
+        # with the same name can both pass the uniqueness check and then
+        # collide on Org.slug's unique constraint here. Leaving this
+        # uncaught would crash into Django's default DEBUG error page, which
+        # dumps this function's own `url` argument (the raw connection
+        # string, password included) into the traceback. Clean up the
+        # already-migrated tenant schema the same way the migrate-failure
+        # path above does, and fail with a message that names nothing
+        # secret.
+        drop_connection(alias)
+        raise ProvisioningError(
+            "An organisation with a similar name already exists — try a different name."
+        )

@@ -94,3 +94,10 @@ NVIDIA_RECEIPT_MOCK = os.getenv("NVIDIA_RECEIPT_MOCK", "false").lower() == "true
 FUNDVAULT_SECRET_KEY = os.getenv("FUNDVAULT_SECRET_KEY", "")
 
 DATABASE_ROUTERS = ["apps.orgs.router.TenantRouter"]
+
+# Exact (host, port) pairs the SSRF guard in apps.orgs.provisioning will
+# still probe even though they resolve to a private/loopback/link-local
+# address. Empty by default — a real deployment's org-creation endpoint has
+# no legitimate reason to reach an internal address. settings_test.py adds
+# this project's own local dev Postgres servers, which run on loopback.
+FUNDVAULT_TENANT_HOST_ALLOWLIST = frozenset()
