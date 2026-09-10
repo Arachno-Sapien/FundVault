@@ -32,6 +32,11 @@ class RouterReadWriteTests(TestCase):
             self.router.db_for_write(TransactionFund)
         self.assertIn("TransactionFund", str(caught.exception))
 
+    def test_falsy_alias_also_raises(self):
+        with org_context(""):
+            with self.assertRaises(NoOrgContext):
+                self.router.db_for_read(User)
+
 
 class RouterMigrateTests(TestCase):
     databases = {"default"}

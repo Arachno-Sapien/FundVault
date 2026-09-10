@@ -20,7 +20,7 @@ class TenantRouter:
         app_label = model._meta.app_label
         if app_label in TENANT_APPS:
             alias = current_org_alias()
-            if alias is None:
+            if not alias:
                 raise NoOrgContext(
                     f"{model.__name__} ({app_label}) was queried for {operation} with no "
                     "organisation in context. Tenant models require OrgContextMiddleware "
