@@ -7,6 +7,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
+from apps.accounts.permissions import Action, needs_approval, require
 from apps.common.audit import add_audit
 from apps.common.auth import auth_required
 from apps.common.utils import json_error, parse_body, uid
@@ -63,6 +64,10 @@ def databases_list_create(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
 
+    denied = require(request.fv_user, Action.MANAGE_FUNDS)
+    if denied:
+        return denied
+
     payload = parse_body(request)
     name = str(payload.get("name", "")).strip()
     description = str(payload.get("description", "")).strip()
@@ -88,6 +93,9 @@ def databases_list_create(request):
 def databases_merge(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+    denied = require(request.fv_user, Action.MANAGE_FUNDS)
+    if denied:
+        return denied
     payload = parse_body(request)
     source_id = str(payload.get("sourceId", "")).strip()
     target_id = str(payload.get("targetId", "")).strip()
@@ -155,6 +163,9 @@ def database_detail(request, database_id):
         return JsonResponse(payload)
 
     if request.method == "PUT":
+        denied = require(request.fv_user, Action.MANAGE_FUNDS)
+        if denied:
+            return denied
         body = parse_body(request)
         name = str(body.get("name", "")).strip()
         description = str(body.get("description", "")).strip()
@@ -172,6 +183,9 @@ def database_detail(request, database_id):
         return JsonResponse(serialize_database(db))
 
     if request.method == "DELETE":
+        denied = require(request.fv_user, Action.MANAGE_FUNDS)
+        if denied:
+            return denied
         db.is_deleted = True
         db.save(update_fields=["is_deleted"])
         TrashItem.objects.create(
@@ -191,6 +205,9 @@ def database_detail(request, database_id):
 def database_archive(request, database_id):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+    denied = require(request.fv_user, Action.MANAGE_FUNDS)
+    if denied:
+        return denied
     db = _get_user_database(request.fv_user, database_id)
     if not db:
         return json_error("Database not found", 404)
@@ -219,6 +236,10 @@ def database_transactions(request, database_id):
 
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+
+    denied = require(request.fv_user, Action.CREATE_TXN)
+    if denied:
+        return denied
 
     body = parse_body(request)
     tx_type = str(body.get("type", "")).strip()
@@ -252,7 +273,7 @@ def database_transactions(request, database_id):
         if tx_type == "debit" and amount > locked.balance:
             return json_error("Insufficient balance", 400)
 
-        requires_approval = locked.approval_threshold > 0 and amount >= locked.approval_threshold
+        requires_approval = needs_approval(request.fv_user, amount, locked.approval_threshold)
         new_balance = (
             locked.balance
             if requires_approval
@@ -302,6 +323,9 @@ def database_transactions(request, database_id):
 def transaction_void(request, transaction_id):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+    denied = require(request.fv_user, Action.MODIFY_TXN)
+    if denied:
+        return denied
     body = parse_body(request)
     reason = str(body.get("reason", "")).strip()
     if not reason:
@@ -336,6 +360,10 @@ def transaction_delete_voided(request, transaction_id):
     if request.method != "DELETE":
         return json_error("Method not allowed", 405)
 
+    denied = require(request.fv_user, Action.MODIFY_TXN)
+    if denied:
+        return denied
+
     txn = (
         TransactionFund.objects.select_related("database")
         .filter(id=transaction_id, database__is_deleted=False)
@@ -362,6 +390,10 @@ def transaction_delete_voided(request, transaction_id):
 def transaction_approve(request, transaction_id):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+
+    denied = require(request.fv_user, Action.APPROVE)
+    if denied:
+        return denied
 
     txn = (
         TransactionFund.objects.select_related("database")
@@ -412,6 +444,9 @@ def transaction_approve(request, transaction_id):
 def transaction_update(request, transaction_id):
     if request.method != "PUT":
         return json_error("Method not allowed", 405)
+    denied = require(request.fv_user, Action.MODIFY_TXN)
+    if denied:
+        return denied
     body = parse_body(request)
     txn = (
         TransactionFund.objects.select_related("database")
@@ -506,6 +541,9 @@ def trash_list(request):
         return JsonResponse([serialize_trash(item) for item in items], safe=False)
 
     if request.method == "DELETE":
+        denied = require(request.fv_user, Action.MANAGE_FUNDS)
+        if denied:
+            return denied
         items = list(TrashItem.objects.filter(deleted_by_id=request.fv_user.id))
         for item in items:
             _delete_trash_item_permanently(item, request.fv_user)
@@ -529,6 +567,9 @@ def _delete_trash_item_permanently(item, user):
 def trash_restore(request, item_id):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+    denied = require(request.fv_user, Action.MANAGE_FUNDS)
+    if denied:
+        return denied
     item = TrashItem.objects.filter(id=item_id, deleted_by_id=request.fv_user.id).first()
     if not item:
         return json_error("Item not found", 404)
@@ -547,6 +588,9 @@ def trash_restore(request, item_id):
 def trash_delete(request, item_id):
     if request.method != "DELETE":
         return json_error("Method not allowed", 405)
+    denied = require(request.fv_user, Action.MANAGE_FUNDS)
+    if denied:
+        return denied
     item = TrashItem.objects.filter(id=item_id, deleted_by_id=request.fv_user.id).first()
     if not item:
         return json_error("Item not found", 404)
@@ -567,6 +611,10 @@ def recurring_list_create(request, database_id):
 
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+
+    denied = require(request.fv_user, Action.MANAGE_FUNDS)
+    if denied:
+        return denied
 
     body = parse_body(request)
     tx_type = str(body.get("type", "")).strip()
@@ -607,6 +655,9 @@ def recurring_list_create(request, database_id):
 def recurring_delete(request, recurring_id):
     if request.method != "DELETE":
         return json_error("Method not allowed", 405)
+    denied = require(request.fv_user, Action.MANAGE_FUNDS)
+    if denied:
+        return denied
     item = (
         RecurringTransaction.objects.select_related("database")
         .filter(id=recurring_id)
@@ -624,6 +675,12 @@ def recurring_delete(request, recurring_id):
 def recurring_process(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+    # Not in the Task 17 brief's table, but this posts TransactionFund rows
+    # (see apps.ledger.services.process_due_recurring), same write as
+    # database_transactions' POST branch, so it gets the same gate.
+    denied = require(request.fv_user, Action.CREATE_TXN)
+    if denied:
+        return denied
     created = process_due_recurring(request.fv_user)
     return JsonResponse({"success": True, "processed": len(created)})
 
