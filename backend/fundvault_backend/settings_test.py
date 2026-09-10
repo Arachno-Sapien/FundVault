@@ -7,3 +7,4 @@ from fundvault_backend.settings import *  # noqa: F401,F403
 FUNDVAULT_JWT_SECRET = "test-jwt-secret"
 FUNDVAULT_SESSION_HOURS = 24
 DEBUG = False
+FUNDVAULT_SECRET_KEY = "cP7mHqLxKcVfJhTgYnWzRbNdSaQeUiOpAsDfGhJkLmM="

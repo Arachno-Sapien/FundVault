@@ -15,6 +15,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "apps.accounts.apps.AccountsConfig",
     "apps.ledger",
+    "apps.orgs.apps.OrgsConfig",
 ]
 
 MIDDLEWARE = [
@@ -88,3 +89,5 @@ GEMINI_RECEIPT_MOCK = os.getenv("GEMINI_RECEIPT_MOCK", "false").lower() == "true
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_RECEIPT_MOCK = os.getenv("NVIDIA_RECEIPT_MOCK", "false").lower() == "true"
+
+FUNDVAULT_SECRET_KEY = os.getenv("FUNDVAULT_SECRET_KEY", "")

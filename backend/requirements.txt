@@ -8,3 +8,4 @@ openai==1.82.0
 Pillow==12.2.0
 python-dotenv==1.0.1
 psycopg[binary]==3.2.10
+cryptography==44.0.0
