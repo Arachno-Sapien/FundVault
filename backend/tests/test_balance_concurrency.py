@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.ledger.models import DatabaseFund, TransactionFund
+from apps.orgs.context import org_context
 
 
 def _post_debit(fund_id, amount, barrier, errors):
@@ -20,16 +21,16 @@ def _post_debit(fund_id, amount, barrier, errors):
         # test: the first thread times out waiting for the second, which is
         # itself still blocked acquiring the lock the first thread holds).
         barrier.wait(timeout=5)
-        with transaction.atomic(using="tenant_dev"):
+        with org_context("tenant_dev"), transaction.atomic(using="tenant_dev"):
             fund = (
-                DatabaseFund.objects.using("tenant_dev")
+                DatabaseFund.objects
                 .select_for_update()
                 .get(id=fund_id)
             )
             if amount > fund.balance:
                 return
             new_balance = fund.balance - amount
-            TransactionFund.objects.using("tenant_dev").create(
+            TransactionFund.objects.create(
                 id=f"txn-{threading.get_ident()}",
                 database_id=fund_id,
                 type="debit",
@@ -50,12 +51,13 @@ class ConcurrentDebitTests(TransactionTestCase):
     databases = {"tenant_dev"}
 
     def test_two_concurrent_debits_cannot_overdraw(self):
-        user = User.objects.using("tenant_dev").create(
-            id="u1", username="a", email="a@example.com", password_hash="x"
-        )
-        fund = DatabaseFund.objects.using("tenant_dev").create(
-            id="f1", created_by=user, name="Fund", balance=100.0
-        )
+        with org_context("tenant_dev"):
+            user = User.objects.create(
+                id="u1", username="a", email="a@example.com", password_hash="x"
+            )
+            fund = DatabaseFund.objects.create(
+                id="f1", created_by=user, name="Fund", balance=100.0
+            )
 
         barrier = threading.Barrier(2)
         errors = []
@@ -69,11 +71,12 @@ class ConcurrentDebitTests(TransactionTestCase):
             t.join(timeout=10)
 
         self.assertEqual(errors, [], f"threads raised: {errors}")
-        fund.refresh_from_db()
+        with org_context("tenant_dev"):
+            fund.refresh_from_db()
+            posted = TransactionFund.objects.count()
         self.assertGreaterEqual(
             fund.balance,
             0,
             "two 80.00 debits against a 100.00 balance overdrew the fund",
         )
-        posted = TransactionFund.objects.using("tenant_dev").count()
         self.assertEqual(posted, 1, "only one of the two debits should have succeeded")

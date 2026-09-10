@@ -3,6 +3,7 @@ from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.ledger.models import DatabaseFund, TransactionFund
+from apps.orgs.context import org_context
 
 
 class RoleChoiceTests(TestCase):
@@ -21,18 +22,20 @@ class OwnershipFieldTests(TestCase):
     databases = {"default", "tenant_dev"}
 
     def setUp(self):
-        self.user = User.objects.using("tenant_dev").create(
-            id="u1",
-            username="alice",
-            email="alice@example.com",
-            password_hash="x",
-            role=User.Role.OWNER,
-        )
+        with org_context("tenant_dev"):
+            self.user = User.objects.create(
+                id="u1",
+                username="alice",
+                email="alice@example.com",
+                password_hash="x",
+                role=User.Role.OWNER,
+            )
 
     def test_fund_records_creator_not_owner(self):
-        fund = DatabaseFund.objects.using("tenant_dev").create(
-            id="f1", created_by=self.user, name="Fund One"
-        )
+        with org_context("tenant_dev"):
+            fund = DatabaseFund.objects.create(
+                id="f1", created_by=self.user, name="Fund One"
+            )
         self.assertEqual(fund.created_by_id, "u1")
         self.assertFalse(
             hasattr(fund, "user_id"),
@@ -40,20 +43,21 @@ class OwnershipFieldTests(TestCase):
         )
 
     def test_transaction_records_creator_and_receipt_key(self):
-        fund = DatabaseFund.objects.using("tenant_dev").create(
-            id="f2", created_by=self.user, name="Fund Two"
-        )
-        txn = TransactionFund.objects.using("tenant_dev").create(
-            id="t1",
-            database=fund,
-            type="credit",
-            amount=100.0,
-            date=timezone.now(),
-            mode="cash",
-            running_balance=100.0,
-            created_by=self.user,
-            receipt_key="receipts/f2/t1.jpg",
-        )
+        with org_context("tenant_dev"):
+            fund = DatabaseFund.objects.create(
+                id="f2", created_by=self.user, name="Fund Two"
+            )
+            txn = TransactionFund.objects.create(
+                id="t1",
+                database=fund,
+                type="credit",
+                amount=100.0,
+                date=timezone.now(),
+                mode="cash",
+                running_balance=100.0,
+                created_by=self.user,
+                receipt_key="receipts/f2/t1.jpg",
+            )
         self.assertEqual(txn.created_by_id, "u1")
         self.assertEqual(txn.receipt_key, "receipts/f2/t1.jpg")
         self.assertFalse(

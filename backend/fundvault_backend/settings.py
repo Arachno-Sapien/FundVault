@@ -91,3 +91,5 @@ NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_RECEIPT_MOCK = os.getenv("NVIDIA_RECEIPT_MOCK", "false").lower() == "true"
 
 FUNDVAULT_SECRET_KEY = os.getenv("FUNDVAULT_SECRET_KEY", "")
+
+DATABASE_ROUTERS = ["apps.orgs.router.TenantRouter"]
