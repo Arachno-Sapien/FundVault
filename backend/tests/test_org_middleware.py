@@ -115,4 +115,35 @@ class MiddlewareTests(TransactionTestCase):
 
         response = self.client.get("/api/databases", HTTP_AUTHORIZATION=f"Bearer {self.token}")
         self.assertEqual(response.status_code, 503)
-        self.assertIn("Acme", json.loads(response.content)["error"])
+        body = json.loads(response.content)["error"]
+        self.assertIn("Acme", body)
+        # The raw driver exception (psycopg's OperationalError) can include the
+        # tenant's host/port/username — none of that may reach the client.
+        self.assertNotIn("127.0.0.1", body)
+        self.assertNotIn(":9", body)
+        self.assertNotIn("psycopg", body)
+        self.assertLess(len(body), 150, "error body looks like it leaked driver detail")
+
+    def test_invalid_connection_string_does_not_leak_details(self):
+        bogus = "not-a-postgres-url-at-all"
+        Org.objects.filter(id="o1").update(db_connection=bogus)
+        drop_connection(ORG_ALIAS)
+        self.addCleanup(lambda: (drop_connection(ORG_ALIAS), ensure_connection(self.org)))
+
+        response = self.client.get("/api/databases", HTTP_AUTHORIZATION=f"Bearer {self.token}")
+        self.assertEqual(response.status_code, 503)
+        body = json.loads(response.content)["error"]
+        self.assertIn("Acme", body)
+        self.assertNotIn(bogus, body)
+
+    def test_expired_or_invalid_bearer_token_is_a_clean_401_not_a_500(self):
+        # A header is present but doesn't decode (garbage/expired/malformed).
+        # OrgContextMiddleware._resolve_org returns None for this by design —
+        # no org context is ever set — so auth_required must not touch the
+        # tenant database (_clean_expired_sessions) before it has confirmed
+        # the token decodes, or it crashes with NoOrgContext instead of 401.
+        response = self.client.get(
+            "/api/databases", HTTP_AUTHORIZATION="Bearer not-a-real-jwt"
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(json.loads(response.content)["error"], "Invalid token")

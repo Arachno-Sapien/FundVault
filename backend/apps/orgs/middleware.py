@@ -1,5 +1,7 @@
 """Resolve the request's organisation and open its database connection."""
 
+import logging
+
 import jwt
 from django.conf import settings
 from django.db import OperationalError
@@ -8,6 +10,8 @@ from django.http import JsonResponse
 from apps.orgs.connections import InvalidConnectionString, ensure_connection
 from apps.orgs.context import reset_current_org, set_current_org
 from apps.orgs.models import Org
+
+logger = logging.getLogger(__name__)
 
 # Paths that must work before an organisation is known.
 PUBLIC_PREFIXES = (
@@ -34,9 +38,15 @@ class OrgContextMiddleware:
 
         try:
             alias = ensure_connection(org)
-        except InvalidConnectionString as exc:
+        except InvalidConnectionString:
+            logger.exception("Invalid database connection string for org %s", org.id)
             return JsonResponse(
-                {"error": f"{org.name} has an invalid database connection: {exc}"},
+                {
+                    "error": (
+                        f"{org.name}'s database connection is misconfigured. "
+                        "Contact your organisation's admin."
+                    )
+                },
                 status=503,
             )
 
@@ -58,8 +68,20 @@ class OrgContextMiddleware:
             return None
         org = getattr(request, "fv_org", None)
         name = org.name if org else "The organisation"
+        logger.exception(
+            "Tenant database unreachable for org %s", getattr(org, "id", None)
+        )
+        # exception's str() (e.g. psycopg's OperationalError) can include the
+        # tenant's host, port, and username — never put it in a client-facing
+        # response. Log it above for operators instead.
         return JsonResponse(
-            {"error": f"{name}'s database is unreachable. {exception}"}, status=503
+            {
+                "error": (
+                    f"{name}'s database is currently unreachable. Try again "
+                    "shortly, or contact your organisation's admin."
+                )
+            },
+            status=503,
         )
 
     def _resolve_org(self, request):

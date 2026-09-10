@@ -41,16 +41,19 @@ def auth_required(view_func):
         if not auth_header.startswith("Bearer "):
             return json_error("No token provided", 401)
 
-        # Deferred until a token is present: it queries the tenant database,
-        # which requires an organisation in context (set by OrgContextMiddleware
-        # from the token itself). Nothing to clean up without one anyway.
-        _clean_expired_sessions()
-
         token = auth_header.split(" ", 1)[1].strip()
         try:
             decoded = jwt.decode(token, settings.FUNDVAULT_JWT_SECRET, algorithms=["HS256"])
         except jwt.PyJWTError:
             return json_error("Invalid token", 401)
+
+        # Deferred until the token decodes: it queries the tenant database,
+        # which requires an organisation in context. OrgContextMiddleware only
+        # sets that context for a token it could itself decode (see
+        # apps.orgs.middleware._resolve_org) — an expired/malformed/invalid
+        # token leaves no org in context, so calling this any earlier raises
+        # apps.orgs.router.NoOrgContext instead of the 401 above.
+        _clean_expired_sessions()
 
         session = (
             Session.objects.select_related("user")
