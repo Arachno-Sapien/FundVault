@@ -8,8 +8,10 @@ from apps.accounts.models import Session, User
 from apps.accounts.serializers import serialize_user
 from apps.common.audit import add_audit
 from apps.common.auth import admin_required, auth_required, create_session, create_session_token
-from apps.common.utils import json_error, parse_body, uid
+from apps.common.utils import json_error, parse_body
 from apps.ledger.models import DatabaseFund, TransactionFund
+from apps.orgs.models import EmailIndex
+from apps.orgs.serializers import serialize_org_summary
 
 
 def _hash_password(raw_password):
@@ -32,42 +34,17 @@ def _other_active_admin_count(user_id):
 
 
 @csrf_exempt
-def signup(request):
+def orgs_for_email(request):
+    """Which organisations does this email belong to? Discovery only."""
     if request.method != "POST":
         return json_error("Method not allowed", 405)
-    if not getattr(request, "fv_org", None):
-        return json_error("Choose an organisation first", 400)
 
-    payload = parse_body(request)
-    username = str(payload.get("username", "")).strip()
-    email = str(payload.get("email", "")).strip().lower()
-    password = str(payload.get("password", ""))
+    email = str(parse_body(request).get("email", "")).strip().lower()
+    if not email:
+        return json_error("Email required", 400)
 
-    if not username or not email or not password:
-        return json_error("All fields required", 400)
-    if len(password) < 6:
-        return json_error("Password must be at least 6 characters", 400)
-
-    if User.objects.filter(username=username).exists() or User.objects.filter(email=email).exists():
-        return json_error("Username or email already exists", 400)
-
-    user_id = uid()
-    role = User.Role.ADMIN if User.objects.count() == 0 else User.Role.MEMBER
-    user = User.objects.create(
-        id=user_id,
-        username=username,
-        email=email,
-        password_hash=_hash_password(password),
-        role=role,
-        is_active=True,
-        updated_at=timezone.now(),
-    )
-
-    token = create_session_token(user.id, request.fv_org.id)
-    create_session(user.id, token)
-    add_audit(user.id, "signup", "user", user.id, f"User {user.username} registered")
-
-    return JsonResponse({"token": token, "user": serialize_user(user)})
+    rows = EmailIndex.objects.select_related("org").filter(email=email).order_by("-last_seen_at")
+    return JsonResponse({"orgs": [serialize_org_summary(row.org) for row in rows]})
 
 
 @csrf_exempt
@@ -89,6 +66,10 @@ def login(request):
         return json_error("Invalid credentials", 401)
     if not user.is_active:
         return json_error("Account is inactive", 403)
+
+    EmailIndex.objects.filter(email=user.email, org=request.fv_org).update(
+        last_seen_at=timezone.now()
+    )
 
     token = create_session_token(user.id, request.fv_org.id)
     create_session(user.id, token)

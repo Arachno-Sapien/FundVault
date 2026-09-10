@@ -106,8 +106,8 @@ class OrgContextMiddleware:
         return org
 
     def _org_from_body(self, request):
-        """Login and signup carry orgId in the body — there is no token yet."""
-        if request.path not in ("/api/auth/login", "/api/auth/signup"):
+        """Login carries orgId in the body — there is no token yet."""
+        if request.path != "/api/auth/login":
             return None
         import json as _json
 
