@@ -97,7 +97,8 @@ DATABASE_ROUTERS = ["apps.orgs.router.TenantRouter"]
 
 # Exact (host, port) pairs the SSRF guard in apps.orgs.provisioning will
 # still probe even though they resolve to a private/loopback/link-local
-# address. Empty by default — a real deployment's org-creation endpoint has
-# no legitimate reason to reach an internal address. settings_test.py adds
-# this project's own local dev Postgres servers, which run on loopback.
-FUNDVAULT_TENANT_HOST_ALLOWLIST = frozenset()
+# address. In DEBUG mode (local dev), allowlist this project's own local dev
+# Postgres servers. In production, always empty — a real deployment's
+# org-creation endpoint has no legitimate reason to reach an internal address.
+# settings_production.py must force this to frozenset() regardless of DEBUG.
+FUNDVAULT_TENANT_HOST_ALLOWLIST = frozenset({("127.0.0.1", 5433), ("127.0.0.1", 5434)}) if DEBUG else frozenset()
