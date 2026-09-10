@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import AuthView from "components/auth/AuthView";
+import OrgGateway from "components/auth/OrgGateway";
 import HeaderBar from "components/layout/HeaderBar";
 import NavTabs from "components/layout/NavTabs";
 import AppModals from "components/modals/AppModals";
@@ -26,14 +26,12 @@ const defaultTxnFilters = {
 
 export default function FundVaultApp() {
   const [theme, setTheme] = useState("dark");
-  const [authTab, setAuthTab] = useState("login");
   const [activeTab, setActiveTab] = useState("home");
   const [token, setToken] = useState("");
   const [currentUser, setCurrentUser] = useState(null);
+  const [currentOrg, setCurrentOrg] = useState(null);
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
 
-  const [loginForm, setLoginForm] = useState({ username: "", password: "" });
-  const [signupForm, setSignupForm] = useState({ username: "", email: "", password: "", confirm: "" });
   const [profileForm, setProfileForm] = useState({
     username: "",
     email: "",
@@ -254,58 +252,21 @@ export default function FundVaultApp() {
     await Promise.all([hydrateDatabases(), refreshAudit(), refreshTrash(), refreshOverview()]);
   };
 
-  const handleLogin = async () => {
-    if (!loginForm.username || !loginForm.password) {
-      toast("Please fill in all fields", "error");
-      return;
-    }
-    try {
-      const response = await apiRequest("/api/auth/login", { method: "POST", body: JSON.stringify(loginForm) });
-      setToken(response.token);
-      setCurrentUser({ ...response.user, token: response.token });
-      localStorage.setItem("fundvault_token", response.token);
-      localStorage.setItem("fundvault_currentUser", JSON.stringify(response.user));
-      setLoginForm({ username: "", password: "" });
-      toast(`Welcome back, ${response.user.username}!`, "success");
-    } catch (err) {
-      toast(err.message, "error");
-    }
-  };
-
-  const handleSignup = async () => {
-    if (!signupForm.username || !signupForm.email || !signupForm.password || !signupForm.confirm) {
-      toast("Please fill in all fields", "error");
-      return;
-    }
-    if (signupForm.password !== signupForm.confirm) {
-      toast("Passwords do not match", "error");
-      return;
-    }
-    if (signupForm.password.length < 6) {
-      toast("Password must be at least 6 characters", "error");
-      return;
-    }
-
-    try {
-      const response = await apiRequest("/api/auth/signup", {
-        method: "POST",
-        body: JSON.stringify({ username: signupForm.username, email: signupForm.email, password: signupForm.password })
-      });
-      setToken(response.token);
-      setCurrentUser({ ...response.user, token: response.token });
-      localStorage.setItem("fundvault_token", response.token);
-      localStorage.setItem("fundvault_currentUser", JSON.stringify(response.user));
-      setSignupForm({ username: "", email: "", password: "", confirm: "" });
-      toast(`Account created! Welcome, ${response.user.username}!`, "success");
-    } catch (err) {
-      toast(err.message, "error");
-    }
+  const handleAuthenticated = ({ token: nextToken, user, org }) => {
+    setToken(nextToken);
+    setCurrentUser({ ...user, token: nextToken });
+    setCurrentOrg(org);
+    localStorage.setItem("fundvault_token", nextToken);
+    localStorage.setItem("fundvault_currentUser", JSON.stringify(user));
+    localStorage.setItem("fundvault_org", JSON.stringify(org));
+    toast(`Welcome to ${org.name}, ${user.username}!`, "success");
   };
 
   const logout = async () => {
     const logoutToken = token;
     setToken("");
     setCurrentUser(null);
+    setCurrentOrg(null);
     setDatabases([]);
     setCurrentDbId(null);
     setTransactions([]);
@@ -317,6 +278,7 @@ export default function FundVaultApp() {
     setActiveTab("home");
     localStorage.removeItem("fundvault_token");
     localStorage.removeItem("fundvault_currentUser");
+    localStorage.removeItem("fundvault_org");
     if (logoutToken) {
       try {
         await apiRequest("/api/auth/logout", { method: "POST" }, logoutToken);
@@ -888,6 +850,8 @@ export default function FundVaultApp() {
       setToken(savedToken);
       setCurrentUser({ ...user, token: savedToken });
     }
+    const savedOrg = localStorage.getItem("fundvault_org");
+    if (savedOrg) setCurrentOrg(JSON.parse(savedOrg));
   }, []);
 
   useEffect(() => {
@@ -959,16 +923,7 @@ export default function FundVaultApp() {
   if (!currentUser || !token) {
     return (
       <>
-        <AuthView
-          authTab={authTab}
-          setAuthTab={setAuthTab}
-          loginForm={loginForm}
-          setLoginForm={setLoginForm}
-          signupForm={signupForm}
-          setSignupForm={setSignupForm}
-          onLogin={handleLogin}
-          onSignup={handleSignup}
-        />
+        <OrgGateway onAuthenticated={handleAuthenticated} onError={message => toast(message, "error")} />
         <div className="toast-container">
           {toasts.map(toastItem => (
             <div key={toastItem.id} className={`toast ${toastItem.type}`}>

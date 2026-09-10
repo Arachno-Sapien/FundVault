@@ -1361,3 +1361,37 @@ tr:hover td {
     font-size: 0.76rem;
   }
 }
+
+.auth-shell { max-width: 460px; margin: 8vh auto; padding: 0 20px; }
+.auth-tabs { display: flex; gap: 4px; margin: 20px 0; }
+.auth-tabs button {
+  flex: 1; padding: 10px; border: 1px solid var(--border, #333);
+  background: transparent; color: inherit; cursor: pointer; border-radius: 6px;
+  font-size: 13px;
+}
+.auth-tabs button.active { background: var(--accent, #4f8cff); color: #fff; border-color: transparent; }
+.org-form { display: flex; flex-direction: column; gap: 8px; }
+.org-form label { font-size: 12px; opacity: 0.75; margin-top: 8px; }
+.org-form input {
+  padding: 10px; border-radius: 6px; border: 1px solid var(--border, #333);
+  background: var(--input-bg, transparent); color: inherit; font-size: 14px;
+}
+.preset-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.preset {
+  padding: 6px 12px; border-radius: 999px; font-size: 12px; cursor: pointer;
+  border: 1px solid var(--border, #333); background: transparent; color: inherit;
+}
+.preset.active { background: var(--accent, #4f8cff); color: #fff; border-color: transparent; }
+.hint { font-size: 12px; opacity: 0.7; line-height: 1.5; margin: 4px 0; }
+.check-ok { font-size: 13px; color: #34c759; }
+.check-bad { font-size: 13px; color: #ff6b6b; }
+.org-choice {
+  text-align: left; padding: 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border, #333); background: transparent; color: inherit;
+  font-size: 14px;
+}
+.org-choice:hover { border-color: var(--accent, #4f8cff); }
+.linkish {
+  background: none; border: none; color: var(--accent, #4f8cff);
+  cursor: pointer; font-size: 12px; padding: 0; text-decoration: underline;
+}

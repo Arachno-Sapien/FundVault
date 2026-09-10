@@ -43,4 +43,22 @@ export async function extractReceipt(file, token) {
   return payload;
 }
 
+export const lookupOrgs = email =>
+  apiRequest("/api/auth/orgs", { method: "POST", body: JSON.stringify({ email }) });
+
+export const previewJoinCode = code =>
+  apiRequest("/api/orgs/join/preview", { method: "POST", body: JSON.stringify({ code }) });
+
+export const validateConnection = databaseUrl =>
+  apiRequest("/api/orgs/validate-connection", {
+    method: "POST",
+    body: JSON.stringify({ databaseUrl })
+  });
+
+export const createOrg = payload =>
+  apiRequest("/api/orgs/create", { method: "POST", body: JSON.stringify(payload) });
+
+export const joinOrg = payload =>
+  apiRequest("/api/orgs/join", { method: "POST", body: JSON.stringify(payload) });
+
 export { API_BASE };
