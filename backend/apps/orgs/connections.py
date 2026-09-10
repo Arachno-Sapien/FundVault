@@ -63,15 +63,27 @@ def build_config(url):
 
 
 def ensure_connection(org):
-    """Register org's database if absent and return its alias."""
+    """Register org's database if absent and return its alias.
+
+    An alias can land in `connections.databases` without going through this
+    function first: provisioning.py and register_org.py both register a
+    fresh alias directly so they can run migrations against it before an Org
+    row (and thus a normal ensure_connection call) exists. The first
+    ensure_connection call for such an alias must not treat "already in
+    connections.databases" as "already tracked in the LRU" — that alias has
+    never passed through the eviction cap, so it needs to both join `_lru`
+    and be subject to the same cap as any other entry.
+    """
     alias = alias_for_org(org.id)
     with _lock:
-        if alias in connections.databases:
+        if alias in connections.databases and alias in _lru:
             _lru.move_to_end(alias, last=True)
             return alias
 
-        connections.databases[alias] = build_config(org.db_connection)
+        if alias not in connections.databases:
+            connections.databases[alias] = build_config(org.db_connection)
         _lru[alias] = True
+        _lru.move_to_end(alias, last=True)
         while len(_lru) > MAX_TENANT_CONNECTIONS:
             oldest, _ = _lru.popitem(last=False)
             _close_and_forget(oldest)

@@ -3,6 +3,7 @@ from unittest import mock
 
 from django.test import Client, TestCase
 
+from apps.orgs import connections as tenant_connections
 from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.models import EmailIndex, Org
 from apps.orgs.provisioning import ProvisioningError, check_connection, provision_org
@@ -20,7 +21,7 @@ DEAD_URL = "postgres://fundvault:devpassword@127.0.0.1:9/nothing"
 # apps.orgs.provisioning.uid to hand out one of these fixed ids instead —
 # each pre-registered below, at import time, the same way those other files
 # do it.
-PROVISION_ORG_IDS = [f"provtest{i}" for i in range(1, 8)]
+PROVISION_ORG_IDS = [f"provtest{i}" for i in range(1, 9)]
 PROVISION_ALIASES = {alias_for_org(org_id) for org_id in PROVISION_ORG_IDS}
 
 
@@ -247,6 +248,42 @@ class CreateOrgEndpointTests(TestCase):
             "username": "alice", "email": "alice@example.com", "password": "hunter22",
         })
         self.assertTrue(EmailIndex.objects.filter(email="alice@example.com").exists())
+
+    @mock.patch("apps.orgs.provisioning.uid", return_value="provtest8")
+    def test_create_org_survives_an_alias_not_yet_tracked_by_ensure_connection(self, _mock_uid):
+        # Regression test for the real, browser-reproduced bug: provision_org()
+        # registers a freshly minted alias straight into
+        # `connections.databases` (bypassing ensure_connection, so it never
+        # joins connections.py's `_lru`), and create_org() then calls
+        # ensure_connection(org) right after -- which used to raise KeyError
+        # from `_lru.move_to_end(alias)` on a key that was never inserted, a
+        # 500 on every real org creation.
+        #
+        # This module's own `_register_provision_aliases()` workaround (see
+        # the comment above PROVISION_ORG_IDS) happens to call
+        # ensure_connection() for every fixed id up front, which also
+        # populates `_lru` for them -- masking exactly this bug for every
+        # other test in this file. A truly random uid() can't be used here
+        # (Django's TestCase computes its per-test database allowlist once,
+        # before any random id exists -- see the same comment), so this test
+        # instead undoes that one side effect for this one alias right before
+        # the request: same alias the database-allowlist constraint requires,
+        # but with `_lru` put back into the exact "registered elsewhere,
+        # never tracked" state provision_org() leaves a truly fresh org in.
+        alias = alias_for_org("provtest8")
+        tenant_connections._lru.pop(alias, None)
+        self.assertIn(
+            alias, tenant_connections.connections.databases,
+            "the alias must still be registered, just not tracked",
+        )
+
+        response = self._post({
+            "name": "Acme Funds", "databaseUrl": TENANT_URL,
+            "username": "alice", "email": "alice@example.com", "password": "hunter22",
+        })
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIn(alias, tenant_connections._lru, "ensure_connection should now track it")
 
     def test_short_password_is_refused(self):
         response = self._post({

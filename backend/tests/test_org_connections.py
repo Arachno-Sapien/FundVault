@@ -104,6 +104,56 @@ class ConnectionRegistryTests(TestCase):
         tenant_connections.drop_connection(alias)
         self.assertNotIn(alias, connections.databases)
 
+    def test_ensure_connection_recovers_an_alias_registered_elsewhere(self):
+        # Reproduces the real bug: provision_org()/register_org.py register
+        # `connections.databases[alias]` directly (to run migrations before
+        # an Org row exists), bypassing ensure_connection entirely, so the
+        # alias never joins `_lru`. The first ensure_connection call for that
+        # org (e.g. create_org's post-provision call) used to call
+        # `_lru.move_to_end(alias)` on a key that was never inserted, which
+        # raises KeyError -- a 500 on every real org creation. It must not
+        # raise, and it must actually start tracking the alias in `_lru` so
+        # eviction and idempotency both still work afterward.
+        alias = "org_direct999"
+        connections.databases[alias] = tenant_connections.build_config(TENANT_URL)
+        self.addCleanup(tenant_connections.drop_connection, alias)
+        self.assertNotIn(alias, tenant_connections._lru, "test setup should mirror the bug: not yet tracked")
+
+        org = Org(id="direct999", db_connection=TENANT_URL)
+        returned = tenant_connections.ensure_connection(org)  # must not raise KeyError
+
+        self.assertEqual(returned, alias)
+        self.assertIn(alias, tenant_connections._lru)
+
+        # Subsequent calls stay idempotent and the alias participates in the cap.
+        second = tenant_connections.ensure_connection(org)
+        self.assertEqual(second, alias)
+
+    def test_recovered_alias_is_subject_to_the_eviction_cap(self):
+        # A registered-elsewhere alias, once recovered by ensure_connection,
+        # must count toward MAX_TENANT_CONNECTIONS like any other entry --
+        # not get a free pass just because it arrived via the recovery path.
+        alias = "org_direct998"
+        connections.databases[alias] = tenant_connections.build_config(TENANT_URL)
+        self.addCleanup(tenant_connections.drop_connection, alias)
+
+        tenant_connections.ensure_connection(Org(id="direct998", db_connection=TENANT_URL))
+        self.assertIn(alias, connections.databases)
+
+        made = []
+        for index in range(tenant_connections.MAX_TENANT_CONNECTIONS):
+            org = Org(
+                id=f"cap{index}", name=f"Org {index}", slug=f"cap-{index}",
+                owner_email="b@example.com", db_connection=TENANT_URL,
+            )
+            made.append(tenant_connections.ensure_connection(org))
+        self.addCleanup(lambda: [tenant_connections.drop_connection(a) for a in made])
+
+        # The recovered alias was the oldest entry in `_lru`, so filling the
+        # cap with newer aliases must evict it -- proving eviction applies
+        # to it, not just to aliases that started out in the "normal" path.
+        self.assertNotIn(alias, connections.databases)
+
     def test_registry_evicts_beyond_the_cap(self):
         made = []
         for index in range(tenant_connections.MAX_TENANT_CONNECTIONS + 5):
