@@ -40,29 +40,27 @@ echo [Prerequisites Check] ✓ Node.js and Python found
 echo.
 
 REM Check if .env file exists
-if not exist ".env" (
-    echo [Setup] Creating .env file...
+if not exist "backend\.env" (
+    echo [Setup] Creating backend\.env file...
     (
-        echo # Django Configuration
-        echo DJANGO_SECRET_KEY=fundvault-django-secret-change-in-production
+        echo # Django
+        echo DJANGO_SECRET_KEY=change-me-in-production
         echo DJANGO_DEBUG=true
         echo DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
         echo.
-        echo # JWT Configuration
-        echo JWT_SECRET=fundvault-secret-key-change-in-production
-        echo.
-        echo # Session Configuration
+        echo # Auth
+        echo JWT_SECRET=change-me-in-production
         echo SESSION_HOURS=24
         echo.
-        echo # AI APIs - NVIDIA Nemotron (Primary)
-        echo NVIDIA_API_KEY=
-        echo NVIDIA_RECEIPT_MOCK=true
+        echo # Encryption key for stored org credentials. Generate with:
+        echo #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+        echo FUNDVAULT_SECRET_KEY=
         echo.
-        echo # AI APIs - Google Gemini (Fallback)
-        echo GEMINI_API_KEY=
-        echo GEMINI_RECEIPT_MOCK=true
-    ) > .env
-    echo [Setup] .env file created. Please update API keys as needed.
+        echo # Databases
+        echo DATABASE_URL=postgres://fundvault:devpassword@127.0.0.1:5433/fundvault_control
+        echo DEV_TENANT_DATABASE_URL=postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev
+    ) > backend\.env
+    echo [Setup] backend\.env file created. Please update API keys as needed.
     echo.
 )
 

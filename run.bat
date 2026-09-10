@@ -7,6 +7,14 @@ echo.
 
 cd /d "%~dp0"
 
+echo Starting development databases...
+docker compose up -d >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo WARNING: could not start Docker databases.
+    echo Set DATABASE_URL and DEV_TENANT_DATABASE_URL in backend\.env to use your own Postgres.
+    echo.
+)
+
 echo Opening FundVault in your browser...
 timeout /t 3 /nobreak >nul
 start http://localhost:3001
