@@ -15,10 +15,11 @@ def _clean_expired_sessions():
     Session.objects.filter(expires_at__lte=timezone.now()).delete()
 
 
-def create_session_token(user_id):
+def create_session_token(user_id, org_id):
     now = timezone.now()
     payload = {
         "id": user_id,
+        "org_id": org_id,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(hours=settings.FUNDVAULT_SESSION_HOURS)).timestamp()),
         "jti": uuid4().hex,
@@ -36,10 +37,14 @@ def create_session(user_id, token):
 def auth_required(view_func):
     @wraps(view_func)
     def wrapped(request, *args, **kwargs):
-        _clean_expired_sessions()
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return json_error("No token provided", 401)
+
+        # Deferred until a token is present: it queries the tenant database,
+        # which requires an organisation in context (set by OrgContextMiddleware
+        # from the token itself). Nothing to clean up without one anyway.
+        _clean_expired_sessions()
 
         token = auth_header.split(" ", 1)[1].strip()
         try:

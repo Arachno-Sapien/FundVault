@@ -21,6 +21,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "apps.orgs.middleware.OrgContextMiddleware",
 ]
 
 ROOT_URLCONF = "fundvault_backend.urls"

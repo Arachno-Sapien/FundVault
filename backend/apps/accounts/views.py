@@ -35,6 +35,8 @@ def _other_active_admin_count(user_id):
 def signup(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+    if not getattr(request, "fv_org", None):
+        return json_error("Choose an organisation first", 400)
 
     payload = parse_body(request)
     username = str(payload.get("username", "")).strip()
@@ -61,7 +63,7 @@ def signup(request):
         updated_at=timezone.now(),
     )
 
-    token = create_session_token(user.id)
+    token = create_session_token(user.id, request.fv_org.id)
     create_session(user.id, token)
     add_audit(user.id, "signup", "user", user.id, f"User {user.username} registered")
 
@@ -72,6 +74,8 @@ def signup(request):
 def login(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
+    if not getattr(request, "fv_org", None):
+        return json_error("Choose an organisation first", 400)
 
     payload = parse_body(request)
     username_or_email = str(payload.get("username", "")).strip()
@@ -86,7 +90,7 @@ def login(request):
     if not user.is_active:
         return json_error("Account is inactive", 403)
 
-    token = create_session_token(user.id)
+    token = create_session_token(user.id, request.fv_org.id)
     create_session(user.id, token)
     add_audit(user.id, "login", "user", user.id, f"User {user.username} logged in")
     return JsonResponse({"token": token, "user": serialize_user(user)})
