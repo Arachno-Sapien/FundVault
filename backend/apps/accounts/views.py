@@ -5,9 +5,10 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from apps.accounts.models import Session, User
+from apps.accounts.permissions import Action, require
 from apps.accounts.serializers import serialize_user
 from apps.common.audit import add_audit
-from apps.common.auth import admin_required, auth_required, create_session, create_session_token
+from apps.common.auth import auth_required, create_session, create_session_token
 from apps.common.utils import json_error, parse_body
 from apps.ledger.models import DatabaseFund, TransactionFund
 from apps.orgs.models import EmailIndex
@@ -25,11 +26,9 @@ def _check_password(raw_password, hashed):
         return False
 
 
-def _other_active_admin_count(user_id):
+def _other_active_owner_count(user_id):
     return (
-        User.objects.filter(role=User.Role.ADMIN, is_active=True)
-        .exclude(id=user_id)
-        .count()
+        User.objects.filter(role=User.Role.OWNER, is_active=True).exclude(id=user_id).count()
     )
 
 
@@ -152,8 +151,11 @@ def me(request):
     return JsonResponse(serialize_user(user))
 
 
-@admin_required
+@auth_required
 def admin_users(request):
+    denied = require(request.fv_user, Action.MANAGE_MEMBERS)
+    if denied:
+        return denied
     if request.method != "GET":
         return json_error("Method not allowed", 405)
 
@@ -173,8 +175,12 @@ def admin_users(request):
 
 
 @csrf_exempt
-@admin_required
+@auth_required
 def admin_user_detail(request, user_id):
+    denied = require(request.fv_user, Action.MANAGE_MEMBERS)
+    if denied:
+        return denied
+
     target = User.objects.filter(id=user_id).first()
     if not target:
         return json_error("User not found", 404)
@@ -189,14 +195,25 @@ def admin_user_detail(request, user_id):
 
         if not next_username or not next_email:
             return json_error("Username and email are required", 400)
-        if next_role not in (User.Role.ADMIN, User.Role.MEMBER):
+
+        if next_role != target.role:
+            denied = require(request.fv_user, Action.CHANGE_ROLE)
+            if denied:
+                return denied
+        if next_role == User.Role.OWNER:
+            return json_error(
+                "Use transfer-ownership to make someone the Owner", 400
+            )
+        if next_role not in (User.Role.ADMIN, User.Role.MEMBER, User.Role.VIEWER):
             return json_error("Invalid role", 400)
         if request.fv_user.id == target.id and not next_is_active:
             return json_error("You cannot deactivate your own account", 400)
 
-        admin_downgrade = target.role == User.Role.ADMIN and (next_role != User.Role.ADMIN or not next_is_active)
-        if admin_downgrade and _other_active_admin_count(target.id) == 0:
-            return json_error("At least one active admin account is required", 400)
+        losing_owner = target.role == User.Role.OWNER and (
+            next_role != User.Role.OWNER or not next_is_active
+        )
+        if losing_owner and _other_active_owner_count(target.id) == 0:
+            return json_error("An organisation must always have an active Owner", 400)
 
         try:
             with transaction.atomic():
@@ -223,8 +240,8 @@ def admin_user_detail(request, user_id):
     if request.method == "DELETE":
         if target.id == request.fv_user.id:
             return json_error("You cannot delete your own account", 400)
-        if target.role == User.Role.ADMIN and _other_active_admin_count(target.id) == 0:
-            return json_error("At least one active admin account is required", 400)
+        if target.role == User.Role.OWNER and _other_active_owner_count(target.id) == 0:
+            return json_error("An organisation must always have an active Owner", 400)
 
         with transaction.atomic():
             from apps.ledger.models import AuditLog, TrashItem
@@ -247,8 +264,11 @@ def admin_user_detail(request, user_id):
 
 
 @csrf_exempt
-@admin_required
+@auth_required
 def admin_reset_password(request, user_id):
+    denied = require(request.fv_user, Action.MANAGE_MEMBERS)
+    if denied:
+        return denied
     if request.method != "POST":
         return json_error("Method not allowed", 405)
 
@@ -275,3 +295,40 @@ def admin_reset_password(request, user_id):
         f'Password reset for user "{target.username}"',
     )
     return JsonResponse({"success": True})
+
+
+@csrf_exempt
+@auth_required
+def transfer_ownership(request, user_id):
+    """Hand Owner to another member. The previous Owner becomes an Admin."""
+    if request.method != "POST":
+        return json_error("Method not allowed", 405)
+
+    denied = require(request.fv_user, Action.TRANSFER_OWNERSHIP)
+    if denied:
+        return denied
+
+    target = User.objects.filter(id=user_id, is_active=True).first()
+    if not target:
+        return json_error("User not found", 404)
+    if target.id == request.fv_user.id:
+        return json_error("You are already the Owner", 400)
+
+    with transaction.atomic():
+        target.role = User.Role.OWNER
+        target.updated_at = timezone.now()
+        target.save(update_fields=["role", "updated_at"])
+
+        previous = User.objects.filter(id=request.fv_user.id).first()
+        previous.role = User.Role.ADMIN
+        previous.updated_at = timezone.now()
+        previous.save(update_fields=["role", "updated_at"])
+
+    add_audit(
+        request.fv_user.id,
+        "update",
+        "user",
+        target.id,
+        f'Ownership transferred to "{target.username}"',
+    )
+    return JsonResponse({"success": True, "owner": serialize_user(target)})

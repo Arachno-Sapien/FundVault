@@ -11,4 +11,5 @@ urlpatterns = [
     path("admin/users", views.admin_users),
     path("admin/users/<str:user_id>", views.admin_user_detail),
     path("admin/users/<str:user_id>/reset-password", views.admin_reset_password),
+    path("admin/users/<str:user_id>/transfer-ownership", views.transfer_ownership),
 ]
