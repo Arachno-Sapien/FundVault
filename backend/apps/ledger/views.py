@@ -55,6 +55,15 @@ def _get_user_database(user, database_id, include_deleted=False):
     return query.first()
 
 
+def _storage_for(request):
+    from apps.ledger.storage import StorageNotConfigured, parse_storage_config
+
+    try:
+        return parse_storage_config(request.fv_org.storage_config)
+    except StorageNotConfigured:
+        return None
+
+
 @csrf_exempt
 @auth_required
 def databases_list_create(request):
@@ -163,8 +172,9 @@ def database_detail(request, database_id):
 
     if request.method == "GET":
         txns = TransactionFund.objects.filter(database_id=db.id).order_by("-date")
+        storage = _storage_for(request)
         payload = serialize_database(db)
-        payload["transactions"] = [serialize_transaction(txn) for txn in txns]
+        payload["transactions"] = [serialize_transaction(txn, storage) for txn in txns]
         return JsonResponse(payload)
 
     if request.method == "PUT":
@@ -237,7 +247,8 @@ def database_transactions(request, database_id):
 
     if request.method == "GET":
         rows = TransactionFund.objects.filter(database_id=database_id).order_by("-date", "-created_at")
-        return JsonResponse([serialize_transaction(row) for row in rows], safe=False)
+        storage = _storage_for(request)
+        return JsonResponse([serialize_transaction(row, storage) for row in rows], safe=False)
 
     if request.method != "POST":
         return json_error("Method not allowed", 405)
@@ -319,7 +330,7 @@ def database_transactions(request, database_id):
     )
     return JsonResponse(
         {
-            "transaction": serialize_transaction(txn),
+            "transaction": serialize_transaction(txn, _storage_for(request)),
             "requiresApproval": requires_approval,
             "newBalance": new_balance,
         }
@@ -493,7 +504,7 @@ def transaction_update(request, transaction_id):
         txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
         recalculate_running_balances(txn.database_id)
     add_audit(request.fv_user.id, "update", "transaction", txn.id, "Transaction edited")
-    return JsonResponse(serialize_transaction(txn))
+    return JsonResponse(serialize_transaction(txn, _storage_for(request)))
 
 
 @auth_required
@@ -739,3 +750,67 @@ def extract_receipt(request):
     image_bytes = image_file.read()
     result = extract_from_receipt_image(image_bytes, mime_type)
     return JsonResponse(result)
+
+
+@csrf_exempt
+@auth_required
+def transaction_receipt(request, transaction_id):
+    """Attach a receipt image to a transaction."""
+    if request.method != "POST":
+        return json_error("Method not allowed", 405)
+
+    denied = require(request.fv_user, Action.CREATE_TXN)
+    if denied:
+        return denied
+
+    from apps.ledger.receipt_extractor import _compress_image
+    from apps.ledger.storage import (
+        StorageNotConfigured,
+        parse_storage_config,
+        put_object,
+        receipt_key_for,
+    )
+
+    # Validate the upload itself before touching storage: a bad request
+    # (missing/oversized/undecodable file) is a 400 regardless of whether
+    # this org even has storage configured, so that check runs first.
+    upload = request.FILES.get("image")
+    if not upload:
+        return json_error("No image file provided", 400)
+    if upload.size > 5 * 1024 * 1024:
+        return json_error("Image must be less than 5 MB", 400)
+
+    txn = TransactionFund.objects.filter(id=transaction_id).first()
+    if not txn:
+        return json_error("Transaction not found", 404)
+
+    raw = upload.read()
+    try:
+        compressed = _compress_image(raw)
+    except Exception:
+        return json_error("That file is not a readable image", 400)
+
+    try:
+        storage = parse_storage_config(request.fv_org.storage_config)
+    except StorageNotConfigured as exc:
+        return json_error(str(exc), 503)
+    if storage is None:
+        return json_error(
+            "Receipt storage is not configured for this organisation. "
+            "An Owner can add it in organisation settings.",
+            503,
+        )
+
+    key = receipt_key_for(txn.database_id, txn.id)
+    try:
+        put_object(storage, key, compressed, "image/jpeg")
+    except Exception as exc:
+        return json_error(f"Could not upload the receipt: {exc}", 502)
+
+    txn.receipt_key = key
+    txn.save(update_fields=["receipt_key"])
+    add_audit(request.fv_user.id, "update", "transaction", txn.id, "Receipt attached")
+
+    from apps.ledger.storage import signed_url
+
+    return JsonResponse({"receipt_url": signed_url(storage, key)})

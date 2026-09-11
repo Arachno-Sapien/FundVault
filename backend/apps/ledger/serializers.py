@@ -25,7 +25,21 @@ def serialize_database(database):
     }
 
 
-def serialize_transaction(txn):
+def _receipt_url(txn, storage_config):
+    """A one-hour signed URL, or None when storage is unconfigured."""
+    if not txn.receipt_key or storage_config is None:
+        return None
+    from apps.ledger.storage import signed_url
+
+    try:
+        return signed_url(storage_config, txn.receipt_key)
+    except Exception:
+        # A storage outage degrades to a missing image rather than a failed
+        # ledger request. The ledger is readable without its receipts.
+        return None
+
+
+def serialize_transaction(txn, storage_config=None):
     base = {
         "id": txn.id,
         "database_id": txn.database_id,
@@ -40,6 +54,7 @@ def serialize_transaction(txn):
         "notes": txn.notes or "",
         "running_balance": float(txn.running_balance),
         "receipt_key": txn.receipt_key,
+        "receipt_url": _receipt_url(txn, storage_config),
         "requires_approval": bool(txn.requires_approval),
         "approved": bool(txn.approved),
         "approved_by": txn.approved_by,
@@ -48,6 +63,7 @@ def serialize_transaction(txn):
         "void_reason": txn.void_reason,
         "voided_by": txn.voided_by,
         "voided_at": txn.voided_at.isoformat() if txn.voided_at else None,
+        "created_by": txn.created_by_id,
         "created_at": txn.created_at.isoformat() if txn.created_at else None,
     }
     mode_data = base["mode_data"]

@@ -14,6 +14,7 @@ urlpatterns = [
     path("transactions/<str:transaction_id>/void", views.transaction_void),
     path("transactions/<str:transaction_id>/delete", views.transaction_delete_voided),
     path("transactions/<str:transaction_id>/approve", views.transaction_approve),
+    path("transactions/<str:transaction_id>/receipt", views.transaction_receipt),
     path("recurring/process", views.recurring_process),
     path("recurring/<str:recurring_id>", views.recurring_delete),
     path("audit", views.audit_list),
