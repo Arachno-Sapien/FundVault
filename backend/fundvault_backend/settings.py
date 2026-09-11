@@ -85,12 +85,6 @@ CORS_ALLOW_ALL_ORIGINS = True
 FUNDVAULT_JWT_SECRET = os.getenv("JWT_SECRET", "fundvault-secret-key-change-in-production")
 FUNDVAULT_SESSION_HOURS = int(os.getenv("SESSION_HOURS", "24"))
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_RECEIPT_MOCK = os.getenv("GEMINI_RECEIPT_MOCK", "false").lower() == "true"
-
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
-NVIDIA_RECEIPT_MOCK = os.getenv("NVIDIA_RECEIPT_MOCK", "false").lower() == "true"
-
 FUNDVAULT_SECRET_KEY = os.getenv("FUNDVAULT_SECRET_KEY", "")
 
 DATABASE_ROUTERS = ["apps.orgs.router.TenantRouter"]

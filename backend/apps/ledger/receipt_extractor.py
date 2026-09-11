@@ -1,22 +1,22 @@
 """
-Receipt / screenshot data extraction with automatic provider fallback.
+Receipt / screenshot data extraction with per-org provider fallback.
 
-Primary:   NVIDIA Nemotron 3 Nano Omni  (nvidia/nemotron-3-nano-omni-30b-a3b-reasoning)
-Fallback:  Google Gemini 2.0 Flash      (gemini-2.0-flash)
-
-If the primary provider fails for any reason (quota exhausted, network
-error, bad JSON, etc.) the request is automatically retried with the
-fallback provider.  The response includes a `_provider` key so the
-frontend can show which model was used.
+Each organisation brings its own provider credentials (`Org.ai_config`,
+encrypted at rest — see `apps.ledger.storage` for the parallel pattern with
+storage credentials). A primary provider is tried first; on any failure the
+optional fallback is tried next. Both are either an OpenAI-compatible
+endpoint (base URL + model + key — NVIDIA NIM, or anything else that speaks
+the same API) or Gemini, which uses its own SDK. The response includes a
+`_provider` key so the frontend can show which model was used.
 """
 
 import base64
 import io
 import json
 import re
+from dataclasses import dataclass, field
 
 from PIL import Image
-from django.conf import settings
 
 # ---------------------------------------------------------------------------
 # Shared prompt
@@ -34,20 +34,51 @@ _PROMPT = (
     "No explanation. No markdown. No reasoning text. Raw JSON only."
 )
 
-# ---------------------------------------------------------------------------
-# Mock response (dev / testing — zero API calls)
-# ---------------------------------------------------------------------------
-_MOCK_RESPONSE = {
-    "amount": 1500.00,
-    "date": "2026-06-19T10:30:00",
-    "sender": "Test Sender",
-    "receiver": "Test Receiver",
-    "reference_id": "UPI123MOCK456",
-    "mode": "electronic",
-    "confidence": 0.95,
-    "_mock": True,
-    "_provider": "mock",
-}
+
+@dataclass
+class AIConfig:
+    provider: str          # "openai_compatible" | "gemini"
+    model: str
+    # repr=False: a stray `logger.info(config)` or unhandled-exception
+    # traceback must not print this into a log line (same pattern as
+    # apps.ledger.storage.StorageConfig).
+    api_key: str = field(repr=False)
+    base_url: str = ""
+
+
+def _one(entry):
+    if not isinstance(entry, dict):
+        return None
+    provider = entry.get("provider")
+    model = entry.get("model")
+    api_key = entry.get("api_key")
+    if not model or not api_key:
+        return None
+    if provider == "openai_compatible":
+        if not entry.get("base_url"):
+            return None
+        return AIConfig("openai_compatible", model, api_key, entry["base_url"])
+    if provider == "gemini":
+        return AIConfig("gemini", model, api_key)
+    return None
+
+
+def parse_ai_config(raw):
+    """{'primary': AIConfig|None, 'fallback': AIConfig|None} from stored JSON."""
+    if not raw:
+        return {"primary": None, "fallback": None}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {"primary": None, "fallback": None}
+    return {"primary": _one(data.get("primary")), "fallback": _one(data.get("fallback"))}
+
+
+def _redact(message, config):
+    """Strip the credential value out of a message before it can reach a log or API response."""
+    if config.api_key:
+        message = message.replace(config.api_key, "***")
+    return message
 
 
 # ---------------------------------------------------------------------------
@@ -130,62 +161,40 @@ def _parse_json_from_text(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Provider: NVIDIA Nemotron
+# Provider: any OpenAI-compatible endpoint (NVIDIA NIM, etc.)
 # ---------------------------------------------------------------------------
 
-def _extract_nvidia(compressed: bytes, api_key: str) -> dict:
-    """
-    Call NVIDIA NIM API with the compressed JPEG.
-    Returns a parsed dict with _provider='nvidia' on success.
-    Raises an exception on any failure so the caller can fall through.
-    """
+def _extract_openai_compatible(compressed: bytes, config: AIConfig) -> dict:
     from openai import OpenAI
 
     b64 = base64.b64encode(compressed).decode("utf-8")
-    data_uri = f"data:image/jpeg;base64,{b64}"
-
-    client = OpenAI(
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=api_key,
-    )
+    client = OpenAI(base_url=config.base_url, api_key=config.api_key)
 
     response = client.chat.completions.create(
-        model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        model=config.model,
         messages=[
             {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": _PROMPT},
-                    {"type": "image_url", "image_url": {"url": data_uri}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                 ],
             }
         ],
         temperature=0.1,
         top_p=0.95,
-        max_tokens=2048,   # needs room for reasoning + JSON output
-        extra_body={
-            "chat_template_kwargs": {
-                "enable_thinking": False,  # skip reasoning, emit JSON directly
-            }
-        },
+        max_tokens=2048,
         stream=False,
     )
-
     choice = response.choices[0]
-
-    # The model sometimes puts the answer in reasoning_content instead of content
     raw = (choice.message.content or "").strip()
     if not raw:
-        # Try the reasoning_content field (present on some NIM responses)
-        reasoning = getattr(choice.message, "reasoning_content", None)
-        if reasoning:
-            raw = reasoning.strip()
-
+        raw = (getattr(choice.message, "reasoning_content", None) or "").strip()
     if not raw:
-        raise json.JSONDecodeError("Empty response from NVIDIA model", "", 0)
+        raise json.JSONDecodeError("Empty response from model", "", 0)
 
     result = _parse_json_from_text(raw)
-    result["_provider"] = "nvidia"
+    result["_provider"] = config.model
     return result
 
 
@@ -193,19 +202,13 @@ def _extract_nvidia(compressed: bytes, api_key: str) -> dict:
 # Provider: Google Gemini
 # ---------------------------------------------------------------------------
 
-def _extract_gemini(compressed: bytes, api_key: str) -> dict:
-    """
-    Call Gemini 2.0 Flash with the compressed JPEG.
-    Returns a parsed dict with _provider='gemini' on success.
-    Raises an exception on any failure so the caller can fall through.
-    """
+def _extract_gemini(compressed: bytes, config: AIConfig) -> dict:
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=api_key)
-
+    client = genai.Client(api_key=config.api_key)
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model=config.model,
         contents=[
             types.Content(
                 parts=[
@@ -215,61 +218,68 @@ def _extract_gemini(compressed: bytes, api_key: str) -> dict:
             )
         ],
     )
-
-    raw = response.text.strip()
-    result = _parse_json_from_text(raw)
-    result["_provider"] = "gemini"
+    result = _parse_json_from_text(response.text.strip())
+    result["_provider"] = config.model
     return result
 
 
 # ---------------------------------------------------------------------------
-# Public entry point — fallback chain
+# Public entry points
 # ---------------------------------------------------------------------------
 
-def extract_from_receipt_image(image_bytes: bytes, mime_type: str) -> dict:
-    """
-    Extract payment details from a receipt / screenshot image.
+def _run(config, compressed):
+    if config.provider == "gemini":
+        return _extract_gemini(compressed, config)
+    return _extract_openai_compatible(compressed, config)
 
-    Tries NVIDIA first, then falls back to Gemini automatically.
-    Returns a dict with extracted fields (plus '_provider' indicating
-    which model succeeded) or {"error": "..."} if both fail.
-    """
-    # ── Mock mode ──────────────────────────────────────────────────────
-    if getattr(settings, "NVIDIA_RECEIPT_MOCK", False) or getattr(settings, "GEMINI_RECEIPT_MOCK", False):
-        return dict(_MOCK_RESPONSE)
 
-    # ── Compress once — reused by both providers ───────────────────────
+def extract_from_receipt_image(image_bytes, mime_type, config):
+    """Extract payment details using the org's own providers.
+
+    `config` is the dict returned by parse_ai_config. The primary is tried
+    first; any failure falls through to the fallback if one is configured.
+    """
+    primary = config.get("primary")
+    fallback = config.get("fallback")
+    if not primary and not fallback:
+        return {
+            "error": "Receipt extraction is not configured for this organisation. "
+                     "An Owner can add an AI provider in organisation settings."
+        }
+
     try:
         compressed = _compress_image(image_bytes)
     except Exception as exc:
         return {"error": f"Image processing failed: {exc}"}
 
-    nvidia_key = getattr(settings, "NVIDIA_API_KEY", "")
-    gemini_key = getattr(settings, "GEMINI_API_KEY", "")
-
     errors = []
-
-    # ── 1. Try NVIDIA ──────────────────────────────────────────────────
-    if nvidia_key:
+    for label, candidate in (("primary", primary), ("fallback", fallback)):
+        if not candidate:
+            continue
         try:
-            return _extract_nvidia(compressed, nvidia_key)
+            return _run(candidate, compressed)
         except json.JSONDecodeError:
-            errors.append("NVIDIA: could not parse model response")
+            errors.append(f"{label} ({candidate.model}): could not parse the model response")
         except Exception as exc:
-            errors.append(f"NVIDIA: {exc}")
-    else:
-        errors.append("NVIDIA: no API key configured")
+            errors.append(f"{label} ({candidate.model}): {_redact(str(exc), candidate)}")
 
-    # ── 2. Fall back to Gemini ─────────────────────────────────────────
-    if gemini_key:
-        try:
-            return _extract_gemini(compressed, gemini_key)
-        except json.JSONDecodeError:
-            errors.append("Gemini: could not parse model response")
-        except Exception as exc:
-            errors.append(f"Gemini: {exc}")
-    else:
-        errors.append("Gemini: no API key configured")
+    return {"error": "Extraction failed. " + " | ".join(errors)}
 
-    # ── Both failed ────────────────────────────────────────────────────
-    return {"error": "Both providers failed: " + " | ".join(errors)}
+
+def check_ai_config(config):
+    """Probe a provider cheaply so a bad key surfaces in settings, not at first use."""
+    target = config.get("primary") or config.get("fallback")
+    if not target:
+        return False, "No provider configured."
+    try:
+        if target.provider == "gemini":
+            from google import genai
+
+            genai.Client(api_key=target.api_key).models.list()
+        else:
+            from openai import OpenAI
+
+            OpenAI(base_url=target.base_url, api_key=target.api_key).models.list()
+        return True, f"{target.model} is reachable."
+    except Exception as exc:
+        return False, _redact(str(exc), target)

@@ -496,16 +496,16 @@ class ExhaustiveMutatingEndpointTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_extract_receipt_allowed_for_member_and_above(self):
-        from django.test import override_settings
-
-        with override_settings(GEMINI_RECEIPT_MOCK=True):
-            for role in ("member", "admin", "owner"):
-                image = io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
-                image.name = "receipt.png"
-                response = self.client.post(
-                    "/api/extract-receipt", data={"image": image}, **self._auth(role)
-                )
-                self.assertNotEqual(response.status_code, 403, role)
+        # No ai_config on this org, so extraction itself reports 503 ("not
+        # configured") — the point of this test is only that the permission
+        # gate doesn't turn these roles away with a 403 first.
+        for role in ("member", "admin", "owner"):
+            image = io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+            image.name = "receipt.png"
+            response = self.client.post(
+                "/api/extract-receipt", data={"image": image}, **self._auth(role)
+            )
+            self.assertNotEqual(response.status_code, 403, role)
 
     # --- trash_list GET branch: no guard, every role can read ---
 

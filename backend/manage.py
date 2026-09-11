@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def main():
-    # Auto-load backend/.env so os.getenv() picks up GEMINI_API_KEY etc.
+    # Auto-load backend/.env so os.getenv() picks up DATABASE_URL etc.
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent / ".env")
 
