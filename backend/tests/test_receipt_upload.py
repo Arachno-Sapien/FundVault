@@ -160,6 +160,33 @@ class ReceiptUploadTests(TestCase):
         self.assertNotIn("super-secret-value", raw_body)
         self.assertNotIn("AKIATESTKEY", raw_body)
 
+    def test_receipt_denied_when_fund_is_soft_deleted(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.filter(id="f1").update(is_deleted=True)
+        response = self._upload(_png())
+        self.assertEqual(response.status_code, 404)
+
+    @mock.patch("apps.ledger.storage.put_object")
+    def test_upload_failure_redacts_credentials_from_response(self, mock_put_object):
+        # put_object talks to boto3, whose exceptions often echo request
+        # parameters (incl. the signed auth header) back in their message.
+        # That message must never reach the HTTP response with the org's
+        # live secret_key/access_key still inside it.
+        mock_put_object.side_effect = RuntimeError(
+            "connection failed for key=super-secret-value auth=AKIATESTKEY"
+        )
+
+        self.org.storage_config = STORAGE_CONFIG
+        self.org.save(update_fields=["storage_config"])
+
+        response = self._upload(_png())
+
+        self.assertEqual(response.status_code, 502)
+        raw_body = response.content.decode()
+        self.assertNotIn("super-secret-value", raw_body)
+        self.assertNotIn("AKIATESTKEY", raw_body)
+        self.assertIn("***", raw_body)
+
     @mock.patch("apps.ledger.storage._client")
     def test_read_time_mints_a_fresh_signed_url(self, mock_client_factory):
         """serialize_transaction mints a URL at read time; it does not persist one."""

@@ -1,3 +1,4 @@
+import io
 import json
 from datetime import timedelta
 
@@ -486,6 +487,25 @@ class ExhaustiveMutatingEndpointTests(TestCase):
         for role in ("admin", "owner"):
             response = self.client.delete("/api/trash", **self._auth(role))
             self.assertEqual(response.status_code, 200, role)
+
+    # --- extract_receipt: CREATE_TXN (guards external paid AI-extraction
+    # API quota, not a DB write) ---
+
+    def test_extract_receipt_denied_for_viewer(self):
+        response = self.client.post("/api/extract-receipt", **self._auth("viewer"))
+        self.assertEqual(response.status_code, 403)
+
+    def test_extract_receipt_allowed_for_member_and_above(self):
+        from django.test import override_settings
+
+        with override_settings(GEMINI_RECEIPT_MOCK=True):
+            for role in ("member", "admin", "owner"):
+                image = io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+                image.name = "receipt.png"
+                response = self.client.post(
+                    "/api/extract-receipt", data={"image": image}, **self._auth(role)
+                )
+                self.assertNotEqual(response.status_code, 403, role)
 
     # --- trash_list GET branch: no guard, every role can read ---
 

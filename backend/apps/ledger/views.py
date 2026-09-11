@@ -716,6 +716,10 @@ def extract_receipt(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
 
+    denied = require(request.fv_user, Action.CREATE_TXN)
+    if denied:
+        return denied
+
     # ── Check configuration ────────────────────────────────────────────
     from django.conf import settings as django_settings
 
@@ -766,6 +770,7 @@ def transaction_receipt(request, transaction_id):
     from apps.ledger.receipt_extractor import _compress_image
     from apps.ledger.storage import (
         StorageNotConfigured,
+        _redact,
         parse_storage_config,
         put_object,
         receipt_key_for,
@@ -780,7 +785,7 @@ def transaction_receipt(request, transaction_id):
     if upload.size > 5 * 1024 * 1024:
         return json_error("Image must be less than 5 MB", 400)
 
-    txn = TransactionFund.objects.filter(id=transaction_id).first()
+    txn = TransactionFund.objects.filter(id=transaction_id, database__is_deleted=False).first()
     if not txn:
         return json_error("Transaction not found", 404)
 
@@ -805,7 +810,7 @@ def transaction_receipt(request, transaction_id):
     try:
         put_object(storage, key, compressed, "image/jpeg")
     except Exception as exc:
-        return json_error(f"Could not upload the receipt: {exc}", 502)
+        return json_error(f"Could not upload the receipt: {_redact(str(exc), storage)}", 502)
 
     txn.receipt_key = key
     txn.save(update_fields=["receipt_key"])
