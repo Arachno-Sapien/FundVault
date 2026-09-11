@@ -147,3 +147,32 @@ class AtomicAliasRegressionTests(TransactionTestCase):
             self.assertEqual(
                 TransactionFund.objects.filter(database_id="f3").count(), 1
             )
+
+    def test_transaction_update_recalculates_balance(self):
+        """transaction_update's save-then-recalculate was missed by the sweep
+        that fixed the other views in this file (it never had a bare atomic()
+        for a grep to find -- it had none at all). Without `using=` wrapping
+        both steps, this doesn't crash under TransactionTestCase the way the
+        select_for_update() sites do, but it's still the same class of gap:
+        confirm the edit and the resulting balance/running_balance are both
+        correctly persisted through the real view."""
+        self._make_fund("f4", balance=0.0)
+        with org_context(ORG_ALIAS):
+            txn = TransactionFund.objects.create(
+                id="t4", database_id="f4", type="credit", amount=100.0,
+                date=timezone.now(), mode="cash", running_balance=100.0,
+                approved=True, created_by_id="u_owner",
+            )
+        response = self.client.put(
+            f"/api/transactions/{txn.id}",
+            data=json.dumps({"amount": 250.0}),
+            content_type="application/json",
+            **self._auth(),
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        with org_context(ORG_ALIAS):
+            txn.refresh_from_db()
+            self.assertEqual(txn.amount, 250.0)
+            self.assertEqual(txn.running_balance, 250.0)
+            fund = DatabaseFund.objects.get(id="f4")
+            self.assertEqual(fund.balance, 250.0)

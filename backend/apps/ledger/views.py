@@ -489,8 +489,9 @@ def transaction_update(request, transaction_id):
     txn.receiver = str(body.get("receiver", txn.receiver or "")).strip() or None
     txn.location = str(body.get("location", txn.location or "")).strip() or None
     txn.notes = str(body.get("notes", txn.notes or "")).strip() or None
-    txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
-    recalculate_running_balances(txn.database_id)
+    with transaction.atomic(using=current_org_alias()):
+        txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
+        recalculate_running_balances(txn.database_id)
     add_audit(request.fv_user.id, "update", "transaction", txn.id, "Transaction edited")
     return JsonResponse(serialize_transaction(txn))
 
