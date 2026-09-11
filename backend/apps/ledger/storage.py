@@ -7,7 +7,7 @@ path, and a URL that leaks stops working within the hour.
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 REQUIRED = ("endpoint_url", "bucket", "access_key", "secret_key")
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -21,8 +21,10 @@ class StorageNotConfigured(Exception):
 class StorageConfig:
     endpoint_url: str
     bucket: str
-    access_key: str
-    secret_key: str
+    # repr=False: a stray `logger.info(config)` or unhandled-exception traceback
+    # must not print these into a log line.
+    access_key: str = field(repr=False)
+    secret_key: str = field(repr=False)
     region: str = "auto"
 
 
