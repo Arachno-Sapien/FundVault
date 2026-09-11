@@ -32,7 +32,8 @@ export default function DatabaseView({
   onOpenVoidTxn,
   onApproveTxn,
   onDeleteVoidedTxn,
-  onViewReceipt
+  onViewReceipt,
+  permissions = {}
 }) {
   const [sortColumn, setSortColumn] = useState(null);
   const [sortDirection, setSortDirection] = useState("asc");
@@ -109,15 +110,21 @@ export default function DatabaseView({
           <div className="db-subtext">{database.description || ""}</div>
           <div className="db-subtext">Created on {formatDate(database.created_at)}</div>
           <div className="db-actions">
-            <button className="btn btn-outline btn-sm" onClick={onOpenEditDb}>
-              ✏️ Edit
-            </button>
-            <button className="btn btn-outline btn-sm" onClick={onArchiveDb}>
-              📁 {database.is_archived ? "Unarchive" : "Archive"}
-            </button>
-            <button className="btn btn-outline btn-sm" onClick={onOpenRecurring}>
-              🔄 Recurring
-            </button>
+            {permissions.manageFunds && (
+              <button className="btn btn-outline btn-sm" onClick={onOpenEditDb}>
+                ✏️ Edit
+              </button>
+            )}
+            {permissions.manageFunds && (
+              <button className="btn btn-outline btn-sm" onClick={onArchiveDb}>
+                📁 {database.is_archived ? "Unarchive" : "Archive"}
+              </button>
+            )}
+            {permissions.manageFunds && (
+              <button className="btn btn-outline btn-sm" onClick={onOpenRecurring}>
+                🔄 Recurring
+              </button>
+            )}
             <button className="btn btn-outline btn-sm" onClick={onOpenExport}>
               📤 Export
             </button>
@@ -201,9 +208,11 @@ export default function DatabaseView({
         <div className="section-label ledger-label">
           Transaction Ledger
         </div>
-        <button className="btn btn-primary btn-sm" onClick={onOpenNewTxn}>
-          + New Transaction
-        </button>
+        {permissions.createTxn && (
+          <button className="btn btn-primary btn-sm" onClick={onOpenNewTxn}>
+            + New Transaction
+          </button>
+        )}
       </div>
 
       <div className="table-scroll">
@@ -268,7 +277,7 @@ export default function DatabaseView({
                 <td>{fmt(txn.running_balance)}</td>
                 <td>
                   <div className="row-actions">
-                    {!txn.is_voided && (
+                    {!txn.is_voided && permissions.modifyTxn && (
                       <>
                         <button className="btn btn-ghost btn-sm" onClick={() => onOpenEditTxn(txn)}>
                           ✏️
@@ -278,12 +287,12 @@ export default function DatabaseView({
                         </button>
                       </>
                     )}
-                    {txn.is_voided && (
+                    {txn.is_voided && permissions.modifyTxn && (
                       <button className="btn btn-danger btn-sm" onClick={() => onDeleteVoidedTxn(txn.id)} title="Delete voided transaction">
                         🗑
                       </button>
                     )}
-                    {txn.requires_approval && !txn.approved && !txn.is_voided && (
+                    {txn.requires_approval && !txn.approved && !txn.is_voided && permissions.approve && (
                       <button className="btn btn-outline btn-sm" onClick={() => onApproveTxn(txn.id)}>
                         ✓
                       </button>

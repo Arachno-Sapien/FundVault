@@ -1395,3 +1395,10 @@ tr:hover td {
   background: none; border: none; color: var(--accent, #4f8cff);
   cursor: pointer; font-size: 12px; padding: 0; text-decoration: underline;
 }
+.org-badge { display: flex; align-items: center; gap: 8px; }
+.org-name { font-weight: 600; font-size: 13px; }
+.role-chip {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--chip-bg, rgba(127, 127, 127, 0.18));
+}

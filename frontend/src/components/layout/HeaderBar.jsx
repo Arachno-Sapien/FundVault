@@ -1,5 +1,8 @@
+import { ACTIONS, can } from "lib/permissions";
+
 export default function HeaderBar({
   currentUser,
+  currentOrg,
   theme,
   onToggleTheme,
   onLogout,
@@ -10,7 +13,7 @@ export default function HeaderBar({
   setUserDropdownOpen
 }) {
   const avatar = (currentUser?.username || "G")[0]?.toUpperCase();
-  const canManageUsers = currentUser?.role === "admin" && !!currentUser?.token;
+  const canManageUsers = can(currentUser, ACTIONS.MANAGE_MEMBERS);
 
   return (
     <header>
@@ -22,6 +25,10 @@ export default function HeaderBar({
       </div>
 
       <div className="header-right">
+        <div className="org-badge">
+          <span className="org-name">{currentOrg?.name || "—"}</span>
+          <span className="role-chip">{currentUser?.role}</span>
+        </div>
         <div className="user-menu-wrap">
           <div className="user-menu" onClick={() => setUserDropdownOpen(prev => !prev)}>
             <div className="user-avatar">

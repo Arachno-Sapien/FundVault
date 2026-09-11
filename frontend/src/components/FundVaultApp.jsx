@@ -13,6 +13,7 @@ import HomeView from "components/views/HomeView";
 import TrashView from "components/views/TrashView";
 import { apiRequest } from "lib/api";
 import { fmt, formatDate, nowInput } from "lib/format";
+import { ACTIONS, can } from "lib/permissions";
 
 const defaultTxnFilters = {
   search: "",
@@ -939,6 +940,7 @@ export default function FundVaultApp() {
     <>
       <HeaderBar
         currentUser={currentUser}
+        currentOrg={currentOrg}
         theme={theme}
         onToggleTheme={() => setTheme(prev => (prev === "light" ? "dark" : "light"))}
         onLogout={logout}
@@ -963,6 +965,7 @@ export default function FundVaultApp() {
           onOpenMerge={() => setModals(prev => ({ ...prev, merge: true }))}
           onEditDbFromCard={openEditDbModal}
           onDeleteDb={deleteDatabase}
+          canManageFunds={can(currentUser, ACTIONS.MANAGE_FUNDS)}
         />
       )}
       {activeTab === "dashboard" && <DashboardView databases={databases} overview={overview} theme={theme} />}
@@ -992,6 +995,12 @@ export default function FundVaultApp() {
           onViewReceipt={txn => {
             setSelectedReceipt(txn.receipt_image);
             setModals(prev => ({ ...prev, receipt: true }));
+          }}
+          permissions={{
+            createTxn: can(currentUser, ACTIONS.CREATE_TXN),
+            modifyTxn: can(currentUser, ACTIONS.MODIFY_TXN),
+            approve: can(currentUser, ACTIONS.APPROVE),
+            manageFunds: can(currentUser, ACTIONS.MANAGE_FUNDS)
           }}
         />
       )}
