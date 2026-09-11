@@ -11,6 +11,7 @@ from apps.common.audit import add_audit
 from apps.common.auth import auth_required, create_session, create_session_token
 from apps.common.utils import json_error, parse_body
 from apps.ledger.models import DatabaseFund, TransactionFund
+from apps.orgs.context import current_org_alias
 from apps.orgs.models import EmailIndex
 from apps.orgs.serializers import serialize_org_summary
 
@@ -314,12 +315,26 @@ def transfer_ownership(request, user_id):
     if target.id == request.fv_user.id:
         return json_error("You are already the Owner", 400)
 
-    with transaction.atomic():
+    # User rows are tenant-routed (apps.orgs.router.TenantRouter), so the
+    # atomic block must be opened on that same alias -- a bare atomic()
+    # defaults to "default" and select_for_update() below would raise
+    # TransactionManagementError against the org's own connection.
+    with transaction.atomic(using=current_org_alias()):
+        # Lock the acting Owner's row before writing anything. Two concurrent
+        # transfer requests from the same Owner both pass the require() check
+        # above (it reads the request-scoped fv_user, not a fresh row), so
+        # without this lock both could promote a different target and leave
+        # the org with two Owners. select_for_update() forces the second
+        # request to block here until the first commits, then it re-reads
+        # role fresh and finds the caller is no longer Owner.
+        previous = User.objects.select_for_update().filter(id=request.fv_user.id).first()
+        if not previous or previous.role != User.Role.OWNER:
+            return json_error("You are no longer the Owner", 400)
+
         target.role = User.Role.OWNER
         target.updated_at = timezone.now()
         target.save(update_fields=["role", "updated_at"])
 
-        previous = User.objects.filter(id=request.fv_user.id).first()
         previous.role = User.Role.ADMIN
         previous.updated_at = timezone.now()
         previous.save(update_fields=["role", "updated_at"])
