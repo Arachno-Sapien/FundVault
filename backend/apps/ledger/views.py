@@ -26,6 +26,7 @@ from apps.ledger.serializers import (
     serialize_trash,
 )
 from apps.ledger.services import process_due_recurring, recalculate_running_balances
+from apps.orgs.context import current_org_alias
 
 
 def _parse_iso_datetime(raw):
@@ -111,7 +112,11 @@ def databases_merge(request):
     if not source or not target:
         return json_error("Database not found", 404)
 
-    with transaction.atomic():
+    # DatabaseFund/TransactionFund are tenant-routed (apps.orgs.router.TenantRouter),
+    # so the atomic block must open on that same alias -- a bare atomic()
+    # defaults to "default" and select_for_update() elsewhere in this file
+    # would raise TransactionManagementError against the org's own connection.
+    with transaction.atomic(using=current_org_alias()):
         merged = DatabaseFund.objects.create(
             id=uid(),
             created_by_id=request.fv_user.id,
@@ -263,7 +268,10 @@ def database_transactions(request, database_id):
         return json_error("Amount must be greater than 0", 400)
     if tx_date is None:
         return json_error("Transaction date is required", 400)
-    with transaction.atomic():
+    # Must open on the org's own alias: select_for_update() below requires an
+    # already-open transaction on the SAME alias its query targets, and a
+    # bare atomic() always opens on "default" instead.
+    with transaction.atomic(using=current_org_alias()):
         # Re-read the fund under a row lock: the balance read above happened
         # outside any transaction and another request may have moved it.
         locked = DatabaseFund.objects.select_for_update().filter(id=database_id).first()
@@ -341,7 +349,8 @@ def transaction_void(request, transaction_id):
     if txn.is_voided:
         return json_error("Transaction is already voided", 400)
 
-    with transaction.atomic():
+    # Tenant-routed model -- see the comment on database_transactions above.
+    with transaction.atomic(using=current_org_alias()):
         txn.is_voided = True
         txn.void_reason = reason
         txn.voided_by = request.fv_user.username
@@ -377,7 +386,8 @@ def transaction_delete_voided(request, transaction_id):
     db_id = txn.database_id
     txn_desc = f"#{txn.id} {txn.type} {txn.amount}"
 
-    with transaction.atomic():
+    # Tenant-routed model -- see the comment on database_transactions above.
+    with transaction.atomic(using=current_org_alias()):
         txn.delete()
         recalculate_running_balances(db_id)
 
@@ -409,7 +419,9 @@ def transaction_approve(request, transaction_id):
     if not txn.requires_approval:
         return json_error("Transaction does not require approval", 400)
 
-    with transaction.atomic():
+    # Must open on the org's own alias -- see the comment on
+    # database_transactions above (select_for_update() below needs it).
+    with transaction.atomic(using=current_org_alias()):
         locked = DatabaseFund.objects.select_for_update().filter(id=txn.database_id).first()
         if not locked:
             return json_error("Database not found", 404)

@@ -129,7 +129,10 @@ def me(request):
         profile_image = None
 
     try:
-        with transaction.atomic():
+        # User is a tenant-routed model (apps.orgs.router.TenantRouter), so the
+        # atomic block must open on that same alias -- a bare atomic() defaults
+        # to "default", which is the wrong connection for this org's data.
+        with transaction.atomic(using=current_org_alias()):
             user.username = next_username
             user.email = next_email
             user.profile_image = profile_image
@@ -217,7 +220,8 @@ def admin_user_detail(request, user_id):
             return json_error("An organisation must always have an active Owner", 400)
 
         try:
-            with transaction.atomic():
+            # Tenant-routed model -- see the comment on `me` above.
+            with transaction.atomic(using=current_org_alias()):
                 target.username = next_username
                 target.email = next_email
                 target.role = next_role
@@ -244,7 +248,8 @@ def admin_user_detail(request, user_id):
         if target.role == User.Role.OWNER and _other_active_owner_count(target.id) == 0:
             return json_error("An organisation must always have an active Owner", 400)
 
-        with transaction.atomic():
+        # Tenant-routed model -- see the comment on `me` above.
+        with transaction.atomic(using=current_org_alias()):
             from apps.ledger.models import AuditLog, TrashItem
 
             TrashItem.objects.filter(deleted_by_id=target.id).delete()
@@ -282,7 +287,8 @@ def admin_reset_password(request, user_id):
     if not target:
         return json_error("User not found", 404)
 
-    with transaction.atomic():
+    # Tenant-routed model -- see the comment on `me` above.
+    with transaction.atomic(using=current_org_alias()):
         target.password_hash = _hash_password(new_password)
         target.updated_at = timezone.now()
         target.save(update_fields=["password_hash", "updated_at"])
