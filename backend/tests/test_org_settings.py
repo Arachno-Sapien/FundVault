@@ -73,7 +73,15 @@ class OrgSettingsTests(TestCase):
         self.assertEqual(response.status_code, 200)
         text = response.content.decode("utf-8")
         self.assertNotIn("nvapi-abcdef123456", text)
-        self.assertIn("••••", text)
+        # JsonResponse's json.dumps defaults to ensure_ascii=True: every
+        # non-ASCII character in the payload (the mask's bullets included)
+        # is backslash-u-escaped in the raw response body instead of being
+        # written as the literal UTF-8 character. A substring search for the
+        # real bullet glyph against undecoded `text` can therefore never
+        # match -- parse the JSON response instead, which decodes the escape
+        # back into the actual character.
+        masked = response.json()["ai"]["primary"]["api_key"]
+        self.assertEqual(masked, "••••3456")
 
     def test_admin_cannot_read_settings(self):
         response = self.client.get(
