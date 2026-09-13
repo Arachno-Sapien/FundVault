@@ -4,8 +4,9 @@ import autoTable from "jspdf-autotable";
 
 import { fmt, formatDate, formatDateShort, nowInput } from "lib/format";
 import { extractReceipt } from "lib/api";
+import OrgSettingsModal from "components/modals/OrgSettingsModal";
 
-function Modal({ open, id, title, children, onClose, large = false }) {
+export function Modal({ open, id, title, children, onClose, large = false }) {
   return (
     <div className={`overlay ${open ? "open" : ""}`} id={id} onClick={e => e.target.id === id && onClose()}>
       <div className={`modal ${large ? "modal-lg" : ""}`}>
@@ -837,6 +838,13 @@ export default function AppModals({
           <span style={{ color: "var(--muted)" }}>Switch Tabs</span>
         </div>
       </Modal>
+
+      <OrgSettingsModal
+        open={modals.orgSettings}
+        onClose={() => close("orgSettings")}
+        request={actions.request}
+        toast={actions.toast}
+      />
     </>
   );
 }

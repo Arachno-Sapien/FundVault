@@ -17,6 +17,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from apps.accounts.models import User
+from apps.accounts.permissions import Action, require
 from apps.accounts.serializers import serialize_user
 from apps.common.audit import add_audit
 from apps.common.auth import auth_required, create_session, create_session_token
@@ -263,3 +264,106 @@ def revoke_join_code(request, code):
         return json_error("Join code not found", 404)
     add_audit(request.fv_user.id, "delete", "join_code", code, "Join code revoked")
     return JsonResponse({"success": True})
+
+
+def _mask(secret):
+    """Show just enough of a secret to be recognizable, never enough to reuse.
+
+    Nothing is returned for a secret 8 characters or shorter — for those, even
+    a 4-character tail could be most of the value.
+    """
+    if not secret:
+        return ""
+    tail = secret[-4:] if len(secret) > 8 else ""
+    return f"••••{tail}"
+
+
+@csrf_exempt
+@auth_required
+def org_settings(request):
+    denied = require(request.fv_user, Action.MANAGE_ORG_CONFIG)
+    if denied:
+        return denied
+
+    org = request.fv_org
+
+    if request.method == "GET":
+        import json as _json
+
+        from apps.ledger.receipt_extractor import parse_ai_config
+
+        ai = parse_ai_config(org.ai_config)
+        try:
+            storage = _json.loads(org.storage_config) if org.storage_config else None
+        except ValueError:
+            storage = None
+
+        return JsonResponse({
+            "org": serialize_org(org),
+            "storage": None if not storage else {
+                "endpoint_url": storage.get("endpoint_url", ""),
+                "bucket": storage.get("bucket", ""),
+                "region": storage.get("region", ""),
+                "access_key": _mask(storage.get("access_key", "")),
+                "secret_key": _mask(storage.get("secret_key", "")),
+            },
+            "ai": {
+                slot: None if not cfg else {
+                    "provider": cfg.provider,
+                    "base_url": cfg.base_url,
+                    "model": cfg.model,
+                    "api_key": _mask(cfg.api_key),
+                }
+                for slot, cfg in ai.items()
+            },
+        })
+
+    if request.method != "PUT":
+        return json_error("Method not allowed", 405)
+
+    import json as _json
+
+    body = parse_body(request)
+    updates = []
+
+    if "storage" in body:
+        from apps.ledger.storage import (
+            StorageNotConfigured,
+            check_storage,
+            parse_storage_config,
+        )
+
+        raw = _json.dumps(body["storage"])
+        try:
+            config = parse_storage_config(raw)
+        except StorageNotConfigured as exc:
+            return json_error(str(exc), 400)
+        if config is not None:
+            ok, message = check_storage(config)
+            if not ok:
+                return json_error(f"Storage check failed: {message}", 400)
+        org.storage_config = raw
+        updates.append("storage_config")
+
+    if "ai" in body:
+        from apps.ledger.receipt_extractor import check_ai_config, parse_ai_config
+
+        raw = _json.dumps(body["ai"])
+        parsed = parse_ai_config(raw)
+        if not parsed["primary"] and not parsed["fallback"]:
+            return json_error("No usable AI provider in that configuration", 400)
+        ok, message = check_ai_config(parsed)
+        if not ok:
+            return json_error(f"AI provider check failed: {message}", 400)
+        org.ai_config = raw
+        updates.append("ai_config")
+
+    if not updates:
+        return json_error("Nothing to update", 400)
+
+    org.save(update_fields=updates)
+    add_audit(
+        request.fv_user.id, "update", "org", org.id,
+        f"Organisation settings updated: {', '.join(updates)}",
+    )
+    return JsonResponse({"success": True, "updated": updates})

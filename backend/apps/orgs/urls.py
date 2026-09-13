@@ -10,4 +10,5 @@ urlpatterns = [
     path("orgs/join", views.join_org),
     path("orgs/codes", views.join_codes),
     path("orgs/codes/<str:code>", views.revoke_join_code),
+    path("orgs/settings", views.org_settings),
 ]

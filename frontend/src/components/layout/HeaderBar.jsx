@@ -8,12 +8,14 @@ export default function HeaderBar({
   onLogout,
   onOpenUserManagement,
   onOpenProfile,
+  onOpenOrgSettings,
   onClearCache,
   userDropdownOpen,
   setUserDropdownOpen
 }) {
   const avatar = (currentUser?.username || "G")[0]?.toUpperCase();
   const canManageUsers = can(currentUser, ACTIONS.MANAGE_MEMBERS);
+  const canManageOrgConfig = can(currentUser, ACTIONS.MANAGE_ORG_CONFIG);
 
   return (
     <header>
@@ -64,6 +66,17 @@ export default function HeaderBar({
                   }}
                 >
                   🛡️ Manage Users
+                </button>
+              )}
+              {canManageOrgConfig && (
+                <button
+                  className="user-dropdown-item"
+                  onClick={() => {
+                    setUserDropdownOpen(false);
+                    onOpenOrgSettings();
+                  }}
+                >
+                  ⚙️ Organisation settings
                 </button>
               )}
               <button

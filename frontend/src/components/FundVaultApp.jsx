@@ -88,7 +88,8 @@ export default function FundVaultApp() {
     receipt: false,
     profile: false,
     userManagement: false,
-    shortcuts: false
+    shortcuts: false,
+    orgSettings: false
   });
 
   const [toasts, setToasts] = useState([]);
@@ -949,6 +950,7 @@ export default function FundVaultApp() {
           await refreshManagedUsers();
         }}
         onOpenProfile={openProfileModal}
+        onOpenOrgSettings={() => setModals(prev => ({ ...prev, orgSettings: true }))}
         onClearCache={clearCache}
         userDropdownOpen={userDropdownOpen}
         setUserDropdownOpen={setUserDropdownOpen}
@@ -1028,6 +1030,7 @@ export default function FundVaultApp() {
         }}
         actions={{
           toast,
+          request: authedRequest,
           createDatabase,
           saveDatabaseEdit,
           submitTransaction,
