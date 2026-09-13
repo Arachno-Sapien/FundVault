@@ -11,7 +11,7 @@ import DashboardView from "components/views/DashboardView";
 import DatabaseView from "components/views/DatabaseView";
 import HomeView from "components/views/HomeView";
 import TrashView from "components/views/TrashView";
-import { apiRequest } from "lib/api";
+import { apiRequest, uploadReceipt } from "lib/api";
 import { fmt, formatDate, nowInput } from "lib/format";
 import { ACTIONS, can } from "lib/permissions";
 
@@ -374,7 +374,7 @@ export default function FundVaultApp() {
     }
   };
 
-  const submitTransaction = async () => {
+  const submitTransaction = async file => {
     if (!currentDbId) return;
     if (!txnForm.type) {
       toast("Select Credit or Debit", "error");
@@ -418,8 +418,7 @@ export default function FundVaultApp() {
           mode: txnForm.mode,
           modeData: txnForm.modeData,
           location: txnForm.location.trim(),
-          notes: txnForm.notes.trim(),
-          receiptImage: txnForm.receiptImage
+          notes: txnForm.notes.trim()
         })
       });
       setModals(prev => ({ ...prev, txn: false }));
@@ -441,6 +440,13 @@ export default function FundVaultApp() {
           : `${txnForm.type === "credit" ? "Credit" : "Debit"} of ${fmt(amount)} recorded`,
         response.requiresApproval ? "warning" : "success"
       );
+      if (file) {
+        try {
+          await uploadReceipt(response.transaction.id, file, currentUser.token);
+        } catch (uploadErr) {
+          toast(`Transaction recorded, but the receipt upload failed: ${uploadErr.message}. Please try attaching it again.`, "warning");
+        }
+      }
       await Promise.all([loadCurrentDb(currentDbId), hydrateDatabases(), refreshAudit(), refreshOverview()]);
     } catch (err) {
       toast(err.message, "error");

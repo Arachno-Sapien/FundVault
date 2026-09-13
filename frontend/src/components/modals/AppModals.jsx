@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -51,6 +51,20 @@ export default function AppModals({
   const [dragOver, setDragOver] = useState(false);
   const [imageUrl, setImageUrl] = useState("");
   const fileInputRef = useRef(null);
+
+  // AppModals never unmounts when the txn modal closes (it just toggles a CSS
+  // class), so this local file/extraction state would otherwise leak into the
+  // next "New Transaction" session. The txn modal closes on both cancel and a
+  // successful submit, so resetting here covers both without a separate signal.
+  useEffect(() => {
+    if (!modals.txn) {
+      setRawFile(null);
+      setExtractConfidence(null);
+      setExtractError("");
+      setImageUrl("");
+      setDragOver(false);
+    }
+  }, [modals.txn]);
 
   const processImageFile = useCallback((file) => {
     if (!file) return;
@@ -591,7 +605,7 @@ export default function AppModals({
           <button className="btn btn-ghost" onClick={() => close("txn")}>
             Cancel
           </button>
-          <button className="btn btn-primary" onClick={actions.submitTransaction}>
+          <button className="btn btn-primary" onClick={() => actions.submitTransaction(rawFile)}>
             Record Transaction →
           </button>
         </div>
