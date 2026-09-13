@@ -612,3 +612,41 @@ class AuditAndTrashOrgScopingTests(TestCase):
         self.assertEqual(response.status_code, 200)
         with org_context(ORG_ALIAS):
             self.assertEqual(TrashItem.objects.count(), 0)
+
+    def test_trash_restore_by_admin_succeeds_for_item_deleted_by_different_member(self):
+        # Same bug class as above, but for the single-item endpoints: they
+        # additionally filtered by deleted_by_id=request.fv_user.id, so an
+        # owner/admin could not restore a specific item a different member
+        # had deleted -- it 404'd as if the item didn't exist.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(
+                id="f_cross", name="Fund", balance=1000.0, approval_threshold=0.0,
+                created_by_id="u_member", is_deleted=True,
+            )
+            TrashItem.objects.create(
+                id="tr_cross", entity_type="database",
+                entity_data=json.dumps({"id": "f_cross"}), deleted_by_id="u_member",
+            )
+
+        response = self.client.post("/api/trash/tr_cross/restore", **self._auth("owner"))
+        self.assertEqual(response.status_code, 200)
+        with org_context(ORG_ALIAS):
+            self.assertFalse(TrashItem.objects.filter(id="tr_cross").exists())
+            self.assertFalse(DatabaseFund.objects.get(id="f_cross").is_deleted)
+
+    def test_trash_delete_by_admin_succeeds_for_item_deleted_by_different_member(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(
+                id="f_cross2", name="Fund", balance=1000.0, approval_threshold=0.0,
+                created_by_id="u_member", is_deleted=True,
+            )
+            TrashItem.objects.create(
+                id="tr_cross2", entity_type="database",
+                entity_data=json.dumps({"id": "f_cross2"}), deleted_by_id="u_member",
+            )
+
+        response = self.client.delete("/api/trash/tr_cross2", **self._auth("owner"))
+        self.assertEqual(response.status_code, 200)
+        with org_context(ORG_ALIAS):
+            self.assertFalse(TrashItem.objects.filter(id="tr_cross2").exists())
+            self.assertFalse(DatabaseFund.objects.filter(id="f_cross2").exists())

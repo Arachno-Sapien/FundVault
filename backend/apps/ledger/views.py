@@ -598,7 +598,10 @@ def trash_restore(request, item_id):
     denied = require(request.fv_user, Action.MANAGE_FUNDS)
     if denied:
         return denied
-    item = TrashItem.objects.filter(id=item_id, deleted_by_id=request.fv_user.id).first()
+    # No user filter: the tenant connection is the org boundary, so any
+    # trash item in this org is restorable by a MANAGE_FUNDS holder,
+    # regardless of which member originally deleted it.
+    item = TrashItem.objects.filter(id=item_id).first()
     if not item:
         return json_error("Item not found", 404)
 
@@ -619,7 +622,9 @@ def trash_delete(request, item_id):
     denied = require(request.fv_user, Action.MANAGE_FUNDS)
     if denied:
         return denied
-    item = TrashItem.objects.filter(id=item_id, deleted_by_id=request.fv_user.id).first()
+    # No user filter here either -- same tenant-boundary reasoning as
+    # trash_restore above.
+    item = TrashItem.objects.filter(id=item_id).first()
     if not item:
         return json_error("Item not found", 404)
     _delete_trash_item_permanently(item, request.fv_user)
