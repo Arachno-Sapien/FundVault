@@ -6,6 +6,18 @@ import { fmt, formatDate, formatDateShort, nowInput } from "lib/format";
 import { extractReceipt } from "lib/api";
 import OrgSettingsModal from "components/modals/OrgSettingsModal";
 
+// Extraction costs the organisation money, so an identical image submitted
+// twice in one session reuses its result rather than paying again.
+const extractionCache = new Map();
+
+async function hashFile(file) {
+  const buffer = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map(byte => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export function Modal({ open, id, title, children, onClose, large = false }) {
   return (
     <div className={`overlay ${open ? "open" : ""}`} id={id} onClick={e => e.target.id === id && onClose()}>
@@ -35,6 +47,7 @@ export default function AppModals({
   const [extracting, setExtracting] = useState(false);
   const [rawFile, setRawFile] = useState(null);
   const [extractConfidence, setExtractConfidence] = useState(null);
+  const [extractError, setExtractError] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [imageUrl, setImageUrl] = useState("");
   const fileInputRef = useRef(null);
@@ -51,6 +64,7 @@ export default function AppModals({
     }
     setRawFile(file);
     setExtractConfidence(null);
+    setExtractError("");
     const reader = new FileReader();
     reader.onload = e => actions.setTxnForm(prev => ({ ...prev, receiptImage: e.target.result }));
     reader.readAsDataURL(file);
@@ -106,12 +120,14 @@ export default function AppModals({
   const handleExtractReceipt = async () => {
     if (!rawFile || !state.currentUser?.token) return;
     setExtracting(true);
+    setExtractError("");
     try {
-      const data = await extractReceipt(rawFile, state.currentUser.token);
-      if (data.error) {
-        actions.toast(data.error, "error");
-        setExtracting(false);
-        return;
+      const key = await hashFile(rawFile);
+      let data = extractionCache.get(key);
+      if (!data) {
+        data = await extractReceipt(rawFile, state.currentUser.token);
+        if (data.error) throw new Error(data.error);
+        extractionCache.set(key, data);
       }
       setExtractConfidence(data.confidence ?? null);
       const updates = {};
@@ -138,7 +154,9 @@ export default function AppModals({
       actions.setTxnForm(prev => ({ ...prev, ...updates }));
       actions.toast("Receipt data extracted successfully", "success");
     } catch (err) {
-      actions.toast(err.message, "error");
+      // Deliberately no retry: a failed extraction shows an error and a manual
+      // button. Silent retries are what actually burn an org's API credits.
+      setExtractError(err.message);
     } finally {
       setExtracting(false);
     }
@@ -536,7 +554,7 @@ export default function AppModals({
                 <img src={state.txnForm.receiptImage} alt="Receipt preview" style={{ maxWidth: 160, borderRadius: 8 }} />
                 <button
                   type="button"
-                  onClick={() => { actions.setTxnForm(prev => ({ ...prev, receiptImage: "" })); setRawFile(null); setExtractConfidence(null); }}
+                  onClick={() => { actions.setTxnForm(prev => ({ ...prev, receiptImage: "" })); setRawFile(null); setExtractConfidence(null); setExtractError(""); }}
                   style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.6)", color: "#fff", border: "none", borderRadius: "50%", width: 22, height: 22, cursor: "pointer", fontSize: ".7rem", display: "flex", alignItems: "center", justifyContent: "center" }}
                   title="Remove image"
                 >
@@ -555,6 +573,15 @@ export default function AppModals({
                 ) : (
                   "✨ Extract Data"
                 )}
+              </button>
+            </div>
+          )}
+
+          {extractError && (
+            <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10, fontSize: ".82rem", color: "#ef4444" }}>
+              <span>⚠ {extractError}</span>
+              <button type="button" className="btn btn-outline btn-sm" onClick={handleExtractReceipt} disabled={extracting}>
+                Try again
               </button>
             </div>
           )}

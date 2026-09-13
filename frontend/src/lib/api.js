@@ -43,6 +43,20 @@ export async function extractReceipt(file, token) {
   return payload;
 }
 
+export async function uploadReceipt(transactionId, file, token) {
+  const form = new FormData();
+  form.append("image", file);
+  const response = await fetch(`${API_BASE}/api/transactions/${transactionId}/receipt`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  let payload = null;
+  try { payload = await response.json(); } catch (_) { payload = null; }
+  if (!response.ok) throw new Error(payload?.error || `Upload failed (${response.status})`);
+  return payload;
+}
+
 export const lookupOrgs = email =>
   apiRequest("/api/auth/orgs", { method: "POST", body: JSON.stringify({ email }) });
 
