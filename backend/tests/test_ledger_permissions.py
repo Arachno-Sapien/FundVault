@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from apps.accounts.models import Session, User
 from apps.common.auth import create_session_token
-from apps.ledger.models import DatabaseFund, RecurringTransaction, TransactionFund, TrashItem
+from apps.ledger.models import AuditLog, DatabaseFund, RecurringTransaction, TransactionFund, TrashItem
 from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
@@ -513,3 +513,102 @@ class ExhaustiveMutatingEndpointTests(TestCase):
         for role in ("owner", "admin", "member", "viewer"):
             response = self.client.get("/api/trash", **self._auth(role))
             self.assertEqual(response.status_code, 200, role)
+
+
+class AuditAndTrashOrgScopingTests(TestCase):
+    """Regression coverage for a bug where audit_list and trash_list's GET
+    (and trash_list's bulk-DELETE) branches filtered by
+    user_id/deleted_by_id=request.fv_user.id -- silently scoping every org
+    member's view down to only their own actions instead of the whole org.
+    That contradicts the multi-tenant design used everywhere else in this
+    file: the tenant connection IS the org boundary, so no per-user
+    ownership filter belongs here. Two users in the same org each write one
+    audit entry / trash item, then either user must see BOTH."""
+
+    databases = {"default", ORG_ALIAS}
+
+    @classmethod
+    def setUpClass(cls):
+        # See LedgerPermissionTests.setUpClass above for why this
+        # re-registration is needed.
+        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+        super().setUpClass()
+
+    def setUp(self):
+        self.client = Client()
+        Org.objects.create(
+            id="o1", name="Acme", slug="acme",
+            owner_email="o@example.com", db_connection=TENANT_URL,
+        )
+        self.tokens = {
+            role: self._user(f"u_{role}", role) for role in ("owner", "member")
+        }
+
+    def _user(self, user_id, role):
+        token = create_session_token(user_id, "o1")
+        with org_context(ORG_ALIAS):
+            User.objects.create(
+                id=user_id, username=user_id, email=f"{user_id}@example.com",
+                password_hash="x", role=role, is_active=True,
+            )
+            Session.objects.create(
+                id=f"s_{user_id}", user_id=user_id, token=token,
+                expires_at=timezone.now() + timedelta(hours=1),
+            )
+        return token
+
+    def _auth(self, role):
+        return {"HTTP_AUTHORIZATION": f"Bearer {self.tokens[role]}"}
+
+    def test_audit_list_shows_both_users_entries_to_either_user(self):
+        with org_context(ORG_ALIAS):
+            AuditLog.objects.create(
+                id="a_owner", user_id="u_owner", action="create",
+                entity_type="database", entity_id="f_owner", details="owner's action",
+            )
+            AuditLog.objects.create(
+                id="a_member", user_id="u_member", action="create",
+                entity_type="database", entity_id="f_member", details="member's action",
+            )
+
+        for role in ("owner", "member"):
+            response = self.client.get("/api/audit", **self._auth(role))
+            self.assertEqual(response.status_code, 200, role)
+            ids = {entry["id"] for entry in json.loads(response.content)}
+            self.assertEqual({"a_owner", "a_member"}, ids, role)
+
+    def test_trash_list_get_shows_both_users_deletions_to_either_user(self):
+        with org_context(ORG_ALIAS):
+            TrashItem.objects.create(
+                id="tr_owner", entity_type="database",
+                entity_data=json.dumps({"id": "f_owner"}), deleted_by_id="u_owner",
+            )
+            TrashItem.objects.create(
+                id="tr_member", entity_type="database",
+                entity_data=json.dumps({"id": "f_member"}), deleted_by_id="u_member",
+            )
+
+        for role in ("owner", "member"):
+            response = self.client.get("/api/trash", **self._auth(role))
+            self.assertEqual(response.status_code, 200, role)
+            ids = {item["id"] for item in json.loads(response.content)}
+            self.assertEqual({"tr_owner", "tr_member"}, ids, role)
+
+    def test_trash_bulk_delete_empties_every_users_trash(self):
+        with org_context(ORG_ALIAS):
+            TrashItem.objects.create(
+                id="trd_owner", entity_type="database",
+                entity_data=json.dumps({"id": "fd_owner"}), deleted_by_id="u_owner",
+            )
+            TrashItem.objects.create(
+                id="trd_member", entity_type="database",
+                entity_data=json.dumps({"id": "fd_member"}), deleted_by_id="u_member",
+            )
+
+        # Owner has MANAGE_FUNDS, so this is the role allowed to bulk-empty
+        # trash (see test_trash_delete_all_* above) -- it must clear the
+        # member's trash item too, not just its own.
+        response = self.client.delete("/api/trash", **self._auth("owner"))
+        self.assertEqual(response.status_code, 200)
+        with org_context(ORG_ALIAS):
+            self.assertEqual(TrashItem.objects.count(), 0)

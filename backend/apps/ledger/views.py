@@ -511,7 +511,9 @@ def transaction_update(request, transaction_id):
 def audit_list(request):
     if request.method != "GET":
         return json_error("Method not allowed", 405)
-    logs = AuditLog.objects.filter(user_id=request.fv_user.id).order_by("-timestamp")[:500]
+    # No user filter: the tenant connection is the org boundary, so this is
+    # the org's full audit trail, not just the caller's own actions.
+    logs = AuditLog.objects.order_by("-timestamp")[:500]
     return JsonResponse([serialize_audit(entry) for entry in logs], safe=False)
 
 
@@ -560,15 +562,17 @@ def analytics_overview(request):
 @csrf_exempt
 @auth_required
 def trash_list(request):
+    # No user filter on either branch: the tenant connection is the org
+    # boundary, so this is the org's full trash, not just the caller's own.
     if request.method == "GET":
-        items = TrashItem.objects.filter(deleted_by_id=request.fv_user.id).order_by("-deleted_at")
+        items = TrashItem.objects.order_by("-deleted_at")
         return JsonResponse([serialize_trash(item) for item in items], safe=False)
 
     if request.method == "DELETE":
         denied = require(request.fv_user, Action.MANAGE_FUNDS)
         if denied:
             return denied
-        items = list(TrashItem.objects.filter(deleted_by_id=request.fv_user.id))
+        items = list(TrashItem.objects.all())
         for item in items:
             _delete_trash_item_permanently(item, request.fv_user)
         return JsonResponse({"success": True})
