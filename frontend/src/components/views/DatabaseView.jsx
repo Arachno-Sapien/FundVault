@@ -267,7 +267,7 @@ export default function DatabaseView({
                 <td>{txn.mode}</td>
                 <td>
                   <div>{getModeDetails(txn)}</div>
-                  {txn.receipt_image && (
+                  {txn.receipt_url && (
                     <button className="btn btn-ghost btn-sm" onClick={() => onViewReceipt(txn)}>
                       📎 Receipt
                     </button>

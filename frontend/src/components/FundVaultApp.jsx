@@ -1001,7 +1001,7 @@ export default function FundVaultApp() {
           onApproveTxn={approveTransaction}
           onDeleteVoidedTxn={deleteVoidedTransaction}
           onViewReceipt={txn => {
-            setSelectedReceipt(txn.receipt_image);
+            setSelectedReceipt(txn.receipt_url);
             setModals(prev => ({ ...prev, receipt: true }));
           }}
           permissions={{
