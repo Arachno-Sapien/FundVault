@@ -19,6 +19,7 @@ PUBLIC_PREFIXES = (
     "/api/orgs/create",
     "/api/orgs/join",
     "/api/orgs/validate-connection",
+    "/api/health",
 )
 
 

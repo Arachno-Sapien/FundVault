@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: fundvault-api
+    runtime: python
+    plan: free
+    buildCommand: "./backend/build.sh"
+    startCommand: "gunicorn fundvault_backend.wsgi:application --chdir backend --bind 0.0.0.0:$PORT --workers 2 --timeout 60"
+    healthCheckPath: /api/health
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: fundvault_backend.settings_production
+      - key: PYTHON_VERSION
+        value: "3.13.1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: fundvault-control
+          property: connectionString
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET
+        generateValue: true
+      # Generate locally and paste — it must never change once orgs exist:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - key: FUNDVAULT_SECRET_KEY
+        sync: false
+      - key: DJANGO_ALLOWED_HOSTS
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+
+databases:
+  - name: fundvault-control
+    plan: free
+    postgresMajorVersion: "16"

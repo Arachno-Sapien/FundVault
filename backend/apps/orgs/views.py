@@ -367,3 +367,10 @@ def org_settings(request):
         f"Organisation settings updated: {', '.join(updates)}",
     )
     return JsonResponse({"success": True, "updated": updates})
+
+
+@csrf_exempt
+def health(request):
+    """Liveness probe. Touches the control plane only — never a tenant."""
+    Org.objects.exists()
+    return JsonResponse({"status": "ok"})
