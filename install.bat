@@ -107,15 +107,21 @@ echo   ✓ Installation Complete!
 echo.
 echo   What's installed:
 echo   - Frontend: Next.js, React, Chart.js, jsPDF
-echo   - Backend: Django, DRF, JWT, bcrypt
-echo   - AI: NVIDIA Nemotron (primary), Google Gemini (fallback)
+echo   - Backend: Django, DRF, JWT, bcrypt, per-org AI + storage clients
 echo   - Image Processing: Pillow
 echo   - Configuration: python-dotenv
 echo.
 echo   Next Steps:
-echo   1. Update .env file with your API keys (optional for mock mode)
-echo   2. Run "run.bat" to start the development servers
-echo   3. Open http://localhost:3001 in your browser
+echo   1. Run "run.bat" — it brings up the two local Postgres databases
+echo      (docker compose up -d) alongside the dev servers.
+echo   2. backend\.env needs a FUNDVAULT_SECRET_KEY before you create your
+echo      first organisation. Generate one with:
+echo        python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+echo      and paste it in as FUNDVAULT_SECRET_KEY=... in backend\.env.
+echo   3. There are no AI or storage keys to set here — each organisation
+echo      configures its own AI provider and receipt storage from its
+echo      settings page in the app, after you create or join one.
+echo   4. Open http://localhost:3001 in your browser.
 echo.
 echo ============================================================
 echo.

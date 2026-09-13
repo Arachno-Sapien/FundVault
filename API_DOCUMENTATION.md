@@ -1,40 +1,103 @@
-# Fund Management System - API Documentation
+# FundVault - API Documentation
 
 **Base URL:** `/api/`
 
-**Authentication:** Most endpoints require a valid session token passed in the `Authorization` header: `Authorization: Bearer <token>`
+## Authentication model
+
+FundVault is multi-tenant: every organisation has its own database, and a
+session token is minted **for one specific organisation**. The token carries
+an `org_id` claim signed by the server; presenting it to a different
+organisation's endpoints does not grant access there — there is nothing to
+resolve, since each org's data lives in a separate database the token's
+claimed org doesn't point at. There is no cross-org session.
+
+Most endpoints require the header:
+
+```text
+Authorization: Bearer <token>
+```
+
+A handful of endpoints are unauthenticated by necessity, because they run
+before any session exists: `POST /api/orgs/validate-connection`,
+`POST /api/orgs/create`, `POST /api/orgs/join/preview`, `POST /api/orgs/join`,
+`POST /api/auth/orgs`, `POST /api/auth/login`, and `GET /api/health`. Every
+other endpoint below is marked **Authentication: Required**, and is further
+gated by role where noted (see [Permissions](#permissions)).
+
+`POST /api/auth/login` is also unauthenticated but still org-scoped: it takes
+an `orgId` in the request body (there is no token yet to carry one).
 
 ---
 
 ## Table of Contents
 
-1. [Authentication Endpoints](#authentication-endpoints)
-2. [User Management Endpoints](#user-management-endpoints)
-3. [Database Endpoints](#database-endpoints)
-4. [Transaction Endpoints](#transaction-endpoints)
-5. [Receipt Extraction Endpoints](#receipt-extraction-endpoints)
-6. [Recurring Transaction Endpoints](#recurring-transaction-endpoints)
-7. [Audit Log Endpoints](#audit-log-endpoints)
-8. [Trash Management Endpoints](#trash-management-endpoints)
-9. [Analytics Endpoints](#analytics-endpoints)
-10. [Data Types & Enums](#data-types--enums)
+1. [Organisation Endpoints](#organisation-endpoints)
+2. [Authentication Endpoints](#authentication-endpoints)
+3. [User Management Endpoints (Admin)](#user-management-endpoints-admin)
+4. [Database Endpoints](#database-endpoints)
+5. [Transaction Endpoints](#transaction-endpoints)
+6. [Receipt Endpoints](#receipt-endpoints)
+7. [Recurring Transaction Endpoints](#recurring-transaction-endpoints)
+8. [Audit Log Endpoints](#audit-log-endpoints)
+9. [Trash Management Endpoints](#trash-management-endpoints)
+10. [Analytics Endpoints](#analytics-endpoints)
+11. [Permissions](#permissions)
+12. [Data Types & Enums](#data-types--enums)
 
 ---
 
-## Authentication Endpoints
+## Organisation Endpoints
 
-### 1. Sign Up
+These back org creation, joining, and org-level settings. Except for
+`GET|PUT /api/orgs/settings`, none of these require a bearer token — that's
+the point of them.
 
-**POST** `/auth/signup`
+### 1. Validate a database connection
 
-Creates a new user account. The first user registered becomes an admin; subsequent users are members.
+**POST** `/orgs/validate-connection`
+
+Probes a candidate Postgres connection string without registering anything —
+used to check a connection before committing to it. Connects directly,
+checks the server version, and verifies it can `CREATE TABLE`.
+
+**Request Body:**
+
+```json
+{ "databaseUrl": "string (required, postgres:// or postgresql://)" }
+```
+
+**Response (200):**
+
+```json
+{ "ok": "boolean", "message": "string" }
+```
+
+Note this always returns `200` — a bad connection string is reported via
+`"ok": false` and a human-readable `message`, not an HTTP error status.
+
+**Error Responses:**
+
+- `400`: Database URL required
+- `405`: Method not allowed
+
+---
+
+### 2. Create an organisation
+
+**POST** `/orgs/create`
+
+Creates a new organisation. The server validates the connection, migrates it,
+creates the caller as Owner, and writes the `orgs` row only if every step
+succeeds — a failed attempt leaves nothing behind to retry against.
 
 **Request Body:**
 
 ```json
 {
-  "username": "string (required, unique)",
-  "email": "string (required, valid email, unique)",
+  "name": "string (required, org name)",
+  "databaseUrl": "string (required, postgres:// connection string)",
+  "username": "string (required)",
+  "email": "string (required)",
   "password": "string (required, min 6 characters)"
 }
 ```
@@ -43,23 +106,294 @@ Creates a new user account. The first user registered becomes an admin; subseque
 
 ```json
 {
-  "token": "string (session token for authentication)",
-  "user": {
-    "id": "string",
-    "username": "string",
-    "email": "string",
-    "profile_image": "string or null",
-    "role": "admin or member",
-    "is_active": "boolean",
-    "created_at": "ISO 8601 datetime",
-    "updated_at": "ISO 8601 datetime or null"
-  }
+  "org": { "id": "string", "name": "string", "slug": "string", "created_at": "ISO 8601 datetime" },
+  "token": "string",
+  "user": { "...": "see serialize_user, Authentication Endpoints" }
 }
 ```
 
 **Error Responses:**
 
-- `400`: All fields required / Username or email already exists / Password must be at least 6 characters
+- `400`: All fields required / Password must be at least 6 characters / a
+  connection or migration failure message (e.g. "Authentication failed —
+  check the username and password.", "That host cannot be used for a tenant
+  database connection.", "An organisation with a similar name already
+  exists — try a different name.")
+- `405`: Method not allowed
+- `500`: Could not create the owner account. Please try again.
+
+---
+
+### 3. Preview a join code
+
+**POST** `/orgs/join/preview`
+
+Resolves a join code to the organisation's name and the role it grants,
+without creating an account — the connection string is never sent to the
+client.
+
+**Request Body:**
+
+```json
+{ "code": "string (required, e.g. FUNDVAULT-AB3D-9KLM)" }
+```
+
+**Response (200):**
+
+```json
+{
+  "org": { "id": "string", "name": "string", "slug": "string" },
+  "role": "admin, member, or viewer"
+}
+```
+
+**Error Responses:**
+
+- `404`: That join code does not exist
+- `400`: That join code has been revoked / has expired / has already been
+  used the maximum number of times
+- `405`: Method not allowed
+
+---
+
+### 4. Join an organisation
+
+**POST** `/orgs/join`
+
+Consumes a join code and creates a new user in that organisation's database,
+with the role the code grants.
+
+**Request Body:**
+
+```json
+{
+  "code": "string (required)",
+  "username": "string (required)",
+  "email": "string (required)",
+  "password": "string (required, min 6 characters)"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "org": { "id": "string", "name": "string", "slug": "string", "created_at": "ISO 8601 datetime" },
+  "token": "string",
+  "user": { "...": "see serialize_user, Authentication Endpoints" }
+}
+```
+
+**Error Responses:**
+
+- `400`: All fields required / Password must be at least 6 characters / That
+  username or email is already used in this organisation / That join code is
+  no longer usable / (code validity errors, as in join/preview)
+- `404`: That join code does not exist
+- `405`: Method not allowed
+- `503`: `<org>`'s database connection is misconfigured. Contact your
+  organisation's admin.
+
+---
+
+### 5. List / create join codes
+
+**GET|POST** `/orgs/codes`
+
+**Authentication:** Required. `GET` requires Admin or Owner. `POST` requires
+Admin or Owner, and an Admin may only mint codes granting Member or Viewer —
+only the Owner may mint an Admin-granting code.
+
+**GET Response (200):**
+
+```json
+[
+  {
+    "code": "string",
+    "grants_role": "admin, member, or viewer",
+    "expires_at": "ISO 8601 datetime",
+    "max_uses": "integer",
+    "uses": "integer",
+    "revoked": "boolean"
+  }
+]
+```
+
+**POST Request Body:**
+
+```json
+{
+  "role": "admin, member, or viewer (default: member)",
+  "maxUses": "integer (optional, default 1, clamped 1-100)",
+  "expiresInDays": "integer (optional, default 14, clamped 1-90)"
+}
+```
+
+**POST Response (200):** same shape as one item of the GET array above
+(`uses` starts at `0`, `revoked` at `false`).
+
+**Error Responses:**
+
+- `400`: You cannot create a join code granting `<role>` / maxUses and
+  expiresInDays must be numbers
+- `401`: Unauthorized
+- `403`: Admin access required
+- `405`: Method not allowed
+
+---
+
+### 6. Revoke a join code
+
+**DELETE** `/orgs/codes/<code>`
+
+**Authentication:** Required (Admin or Owner).
+
+**Response (200):**
+
+```json
+{ "success": true }
+```
+
+**Error Responses:**
+
+- `401`: Unauthorized
+- `403`: Admin access required
+- `404`: Join code not found
+- `405`: Method not allowed
+
+---
+
+### 7. Get / update organisation settings
+
+**GET|PUT** `/orgs/settings`
+
+**Authentication:** Required (Owner only — this is the one place database,
+storage, and AI credentials can be viewed or changed).
+
+**GET Response (200):**
+
+```json
+{
+  "org": { "id": "string", "name": "string", "slug": "string", "created_at": "ISO 8601 datetime" },
+  "storage": null,
+  "ai": {
+    "primary": null,
+    "fallback": null
+  }
+}
+```
+
+When storage is configured, `"storage"` is instead:
+
+```json
+{
+  "endpoint_url": "string",
+  "bucket": "string",
+  "region": "string",
+  "access_key": "string (masked, e.g. ••••3f2a)",
+  "secret_key": "string (masked)"
+}
+```
+
+When a provider slot is configured, `"primary"`/`"fallback"` is instead:
+
+```json
+{
+  "provider": "openai_compatible or gemini",
+  "base_url": "string (empty for gemini)",
+  "model": "string",
+  "api_key": "string (masked)"
+}
+```
+
+Masked values never round-trip a usable secret — a secret 8 characters or
+shorter is masked to `""`. Neither `secret_key` nor `api_key` can be read
+back in full through this endpoint by anyone, including another Owner.
+
+**PUT Request Body:** either or both of:
+
+```json
+{
+  "storage": {
+    "endpoint_url": "string",
+    "bucket": "string",
+    "region": "string (optional, default \"auto\")",
+    "access_key": "string",
+    "secret_key": "string"
+  },
+  "ai": {
+    "primary": { "provider": "openai_compatible", "base_url": "string", "model": "string", "api_key": "string" },
+    "fallback": { "provider": "gemini", "model": "string", "api_key": "string" }
+  }
+}
+```
+
+Both `storage` and `ai` are validated with a live probe call before being
+saved (a small object round-trip for storage, a cheap list/models call for
+AI) — a bad key or endpoint is rejected here rather than at first use.
+
+**PUT Response (200):**
+
+```json
+{ "success": true, "updated": ["storage_config", "ai_config"] }
+```
+
+**Error Responses:**
+
+- `400`: Storage config is missing: ... / Storage check failed: ... / No
+  usable AI provider in that configuration / AI provider check failed: ... /
+  Nothing to update
+- `401`: Unauthorized
+- `403`: You do not have permission to do that
+- `405`: Method not allowed
+
+---
+
+### 8. Health check
+
+**GET** `/health`
+
+Liveness probe. Touches only the control-plane database, never a tenant's.
+
+**Response (200):**
+
+```json
+{ "status": "ok" }
+```
+
+---
+
+## Authentication Endpoints
+
+There is no `POST /auth/signup` — the only ways to get an account are
+[Create an organisation](#2-create-an-organisation) and
+[Join an organisation](#4-join-an-organisation), above.
+
+### 1. Which organisations does this email belong to?
+
+**POST** `/auth/orgs`
+
+Discovery step for returning users — does not authenticate anything.
+
+**Request Body:**
+
+```json
+{ "email": "string (required)" }
+```
+
+**Response (200):**
+
+```json
+{ "orgs": [{ "id": "string", "name": "string", "slug": "string" }] }
+```
+
+An email with no matching organisation returns `{"orgs": []}`, not an error —
+the frontend is expected to show "create one, or ask an admin for a join
+code."
+
+**Error Responses:**
+
+- `400`: Email required
 - `405`: Method not allowed
 
 ---
@@ -68,12 +402,11 @@ Creates a new user account. The first user registered becomes an admin; subseque
 
 **POST** `/auth/login`
 
-Authenticates a user and returns a session token.
-
 **Request Body:**
 
 ```json
 {
+  "orgId": "string (required — from the org picker after auth/orgs)",
   "username": "string (username or email, required)",
   "password": "string (required)"
 }
@@ -82,17 +415,21 @@ Authenticates a user and returns a session token.
 **Response (200):**
 
 ```json
-{
-  "token": "string (session token for authentication)",
-  "user": { }
-}
+{ "token": "string", "user": { "id": "string", "username": "string", "email": "string", "profile_image": "string or null", "role": "owner, admin, member, or viewer", "is_active": "boolean", "created_at": "ISO 8601 datetime", "updated_at": "ISO 8601 datetime or null" } }
 ```
+
+The returned token is minted for `orgId` only — it will not authenticate
+against any other organisation.
 
 **Error Responses:**
 
+- `400`: Choose an organisation first (missing `orgId`)
+- `404`: Organisation not found
 - `401`: Invalid credentials
 - `403`: Account is inactive
 - `405`: Method not allowed
+- `503`: `<org>`'s database connection is misconfigured. Contact your
+  organisation's admin.
 
 ---
 
@@ -100,30 +437,24 @@ Authenticates a user and returns a session token.
 
 **POST** `/auth/logout`
 
-Logs out the authenticated user and invalidates their session token.
-
 **Authentication:** Required
 
 **Response (200):**
 
 ```json
-{
-  "success": true
-}
+{ "success": true }
 ```
 
 **Error Responses:**
 
-- `401`: Unauthorized (invalid or missing token)
+- `401`: Unauthorized
 - `405`: Method not allowed
 
 ---
 
-### 4. Get Current User Profile
+### 4. Get current user profile
 
 **GET** `/auth/me`
-
-Retrieves the profile of the currently authenticated user.
 
 **Authentication:** Required
 
@@ -135,7 +466,7 @@ Retrieves the profile of the currently authenticated user.
   "username": "string",
   "email": "string",
   "profile_image": "string or null",
-  "role": "admin or member",
+  "role": "owner, admin, member, or viewer",
   "is_active": "boolean",
   "created_at": "ISO 8601 datetime",
   "updated_at": "ISO 8601 datetime or null"
@@ -149,11 +480,9 @@ Retrieves the profile of the currently authenticated user.
 
 ---
 
-### 5. Update Current User Profile
+### 5. Update current user profile
 
 **PUT** `/auth/me`
-
-Updates the profile of the currently authenticated user.
 
 **Authentication:** Required
 
@@ -161,8 +490,8 @@ Updates the profile of the currently authenticated user.
 
 ```json
 {
-  "username": "string (optional, must be unique if provided)",
-  "email": "string (optional, must be valid email and unique if provided)",
+  "username": "string (optional)",
+  "email": "string (optional)",
   "profile_image": "string or null (optional, base64 encoded image)",
   "currentPassword": "string (required if changing password)",
   "newPassword": "string (optional, min 6 characters)",
@@ -170,30 +499,29 @@ Updates the profile of the currently authenticated user.
 }
 ```
 
-**Response (200):**
-
-```json
-{
-}
-```
+**Response (200):** the updated user object, same shape as `GET /auth/me`.
+Changing the password invalidates every other session for this user (the
+current one is kept).
 
 **Error Responses:**
 
-- `400`: Username and email are required / Password must be at least 6 characters / Passwords do not match / Username or email already exists
+- `400`: Username and email are required / Password must be at least 6
+  characters / Passwords do not match / Username or email already exists
 - `401`: Current password is incorrect / Unauthorized
 - `405`: Method not allowed
 
 ---
 
-## User Management Endpoints
+## User Management Endpoints (Admin)
 
-### 1. List All Users (Admin Only)
+**Authentication:** Required on all of these. Listing, updating, and deleting
+require Admin or Owner (`MANAGE_MEMBERS`); changing a user's `role` requires
+Owner specifically (`CHANGE_ROLE`); transferring ownership requires Owner
+(`TRANSFER_OWNERSHIP`).
+
+### 1. List all users
 
 **GET** `/admin/users`
-
-Retrieves a list of all users with their database and transaction statistics.
-
-**Authentication:** Required (Admin role)
 
 **Response (200):**
 
@@ -204,7 +532,7 @@ Retrieves a list of all users with their database and transaction statistics.
     "username": "string",
     "email": "string",
     "profile_image": "string or null",
-    "role": "admin or member",
+    "role": "owner, admin, member, or viewer",
     "is_active": "boolean",
     "created_at": "ISO 8601 datetime",
     "updated_at": "ISO 8601 datetime or null",
@@ -215,45 +543,22 @@ Retrieves a list of all users with their database and transaction statistics.
 ]
 ```
 
-**Error Responses:**
-
-- `401`: Unauthorized
-- `403`: Forbidden (not admin)
-- `405`: Method not allowed
-
----
-
-### 2. Get User Detail (Admin Only)
-
-**GET** `/admin/users/<user_id>`
-
-Retrieves detailed information about a specific user.
-
-**Authentication:** Required (Admin role)
-
-**Response (200):**
-
-```json
-{
-}
-```
+Sorted admins/owners first, then by `created_at`.
 
 **Error Responses:**
 
 - `401`: Unauthorized
-- `403`: Forbidden (not admin)
-- `404`: User not found
+- `403`: You do not have permission to do that
 - `405`: Method not allowed
 
 ---
 
-### 3. Update User (Admin Only)
+### 2. Update a user
 
 **PUT** `/admin/users/<user_id>`
 
-Updates a user's profile, role, or active status.
-
-**Authentication:** Required (Admin role)
+There is no `GET /admin/users/<user_id>` — only `PUT` and `DELETE` exist on
+this path; a `GET` here returns `405`.
 
 **Request Body:**
 
@@ -261,83 +566,109 @@ Updates a user's profile, role, or active status.
 {
   "username": "string (optional)",
   "email": "string (optional)",
-  "role": "admin or member (optional)",
+  "role": "admin, member, or viewer (optional — owner is rejected, see below)",
   "is_active": "boolean (optional)"
 }
 ```
 
-**Response (200):**
+**Response (200):** the updated user object (same shape as `GET /auth/me`).
 
-```json
-{
-}
-```
+**Behavior:**
+
+- Setting `role` to anything other than the target's current role requires
+  Owner; setting it to `owner` is always rejected — use
+  [transfer-ownership](#5-transfer-ownership) instead.
+- You cannot deactivate your own account.
+- An organisation must always have an active Owner — demoting or
+  deactivating the sole Owner is rejected.
 
 **Error Responses:**
 
-- `400`: Username and email are required / Invalid role / You cannot deactivate your own account / At least one active admin account is required / Username or email already exists
+- `400`: Username and email are required / Use transfer-ownership to make
+  someone the Owner / Invalid role / You cannot deactivate your own account /
+  An organisation must always have an active Owner / Username or email
+  already exists
 - `401`: Unauthorized
-- `403`: Forbidden (not admin)
+- `403`: You do not have permission to do that
 - `404`: User not found
 - `405`: Method not allowed
 
 ---
 
-### 4. Delete User (Admin Only)
+### 3. Delete a user
 
 **DELETE** `/admin/users/<user_id>`
 
-Deletes a user account and all associated data (databases, transactions, recurring transactions, audit logs).
-
-**Authentication:** Required (Admin role)
+Deletes the user and their sessions; their trash items are deleted and their
+audit log entries are kept with `user_id` cleared to `null` rather than
+deleted.
 
 **Response (200):**
 
 ```json
-{
-  "success": true
-}
+{ "success": true }
 ```
 
 **Error Responses:**
 
-- `400`: You cannot delete your own account / At least one active admin account is required
+- `400`: You cannot delete your own account / An organisation must always
+  have an active Owner
 - `401`: Unauthorized
-- `403`: Forbidden (not admin)
+- `403`: You do not have permission to do that
 - `404`: User not found
 - `405`: Method not allowed
 
 ---
 
-### 5. Reset User Password (Admin Only)
+### 4. Reset a user's password
 
 **POST** `/admin/users/<user_id>/reset-password`
 
-Resets a user's password and logs out all their sessions.
-
-**Authentication:** Required (Admin role)
+Resets the password and deletes all of that user's sessions.
 
 **Request Body:**
 
 ```json
-{
-  "newPassword": "string (required, min 6 characters)"
-}
+{ "newPassword": "string (required, min 6 characters)" }
 ```
 
 **Response (200):**
 
 ```json
-{
-  "success": true
-}
+{ "success": true }
 ```
 
 **Error Responses:**
 
 - `400`: Password must be at least 6 characters
 - `401`: Unauthorized
-- `403`: Forbidden (not admin)
+- `403`: You do not have permission to do that
+- `404`: User not found
+- `405`: Method not allowed
+
+---
+
+### 5. Transfer ownership
+
+**POST** `/admin/users/<user_id>/transfer-ownership`
+
+Hands Owner to another active member; the caller becomes Admin. Requires
+Owner. Guarded against a race between two concurrent transfer attempts from
+the same Owner with `select_for_update()` — the second request re-reads the
+caller's role after the first commits and is rejected if it's no longer
+Owner.
+
+**Response (200):**
+
+```json
+{ "success": true, "owner": { "...": "the promoted user, same shape as GET /auth/me" } }
+```
+
+**Error Responses:**
+
+- `400`: You are already the Owner / You are no longer the Owner
+- `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: User not found
 - `405`: Method not allowed
 
@@ -345,13 +676,16 @@ Resets a user's password and logs out all their sessions.
 
 ## Database Endpoints
 
-### 1. List Databases
+"Database" here means a fund/ledger, not a Postgres instance. Funds are
+visible to the whole organisation — there is no per-fund access list.
+
+**Authentication:** Required on all of these. Creating, updating, deleting,
+archiving, and merging require Admin or Owner (`MANAGE_FUNDS`); reading is
+open to any role, including Viewer.
+
+### 1. List databases
 
 **GET** `/databases`
-
-Retrieves all active (non-deleted) databases for the authenticated user.
-
-**Authentication:** Required
 
 **Response (200):**
 
@@ -359,7 +693,7 @@ Retrieves all active (non-deleted) databases for the authenticated user.
 [
   {
     "id": "string",
-    "user_id": "string",
+    "created_by": "string (user id)",
     "name": "string",
     "description": "string",
     "balance": "float",
@@ -379,13 +713,9 @@ Retrieves all active (non-deleted) databases for the authenticated user.
 
 ---
 
-### 2. Create Database
+### 2. Create a database
 
 **POST** `/databases`
-
-Creates a new database for the authenticated user.
-
-**Authentication:** Required
 
 **Request Body:**
 
@@ -398,35 +728,28 @@ Creates a new database for the authenticated user.
 }
 ```
 
-**Response (200):**
-
-```json
-{
-}
-```
+**Response (200):** the created database, same shape as one item of the
+`GET /databases` array above.
 
 **Error Responses:**
 
 - `400`: Name required
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `405`: Method not allowed
 
 ---
 
-### 3. Get Database Detail
+### 3. Get database detail
 
 **GET** `/databases/<database_id>`
 
-Retrieves a specific database with all its transactions.
-
-**Authentication:** Required
-
-**Response (200):**
+**Response (200):** the database object plus its transactions:
 
 ```json
 {
   "id": "string",
-  "user_id": "string",
+  "created_by": "string",
   "name": "string",
   "description": "string",
   "balance": "float",
@@ -435,8 +758,7 @@ Retrieves a specific database with all its transactions.
   "is_archived": "boolean",
   "is_deleted": "boolean",
   "created_at": "ISO 8601 datetime",
-  "transactions": [
-  ]
+  "transactions": [ "see Transaction Endpoints for the shape" ]
 }
 ```
 
@@ -448,13 +770,9 @@ Retrieves a specific database with all its transactions.
 
 ---
 
-### 4. Update Database
+### 4. Update a database
 
 **PUT** `/databases/<database_id>`
-
-Updates database settings.
-
-**Authentication:** Required
 
 **Request Body:**
 
@@ -467,78 +785,67 @@ Updates database settings.
 }
 ```
 
-**Response (200):**
-
-```json
-{
-}
-```
+**Response (200):** the updated database (same shape as `POST /databases`).
 
 **Error Responses:**
 
 - `400`: Name required
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Database not found
 - `405`: Method not allowed
 
 ---
 
-### 5. Delete Database
+### 5. Delete a database
 
 **DELETE** `/databases/<database_id>`
 
-Soft-deletes a database (moves to trash, data preserved). To permanently delete, use the trash endpoint.
-
-**Authentication:** Required
+Soft-deletes (moves to trash). Use the trash endpoints to permanently delete
+or restore.
 
 **Response (200):**
 
 ```json
-{
-  "success": true
-}
+{ "success": true }
 ```
 
 **Error Responses:**
 
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Database not found
 - `405`: Method not allowed
 
 ---
 
-### 6. Archive/Unarchive Database
+### 6. Archive/unarchive a database
 
 **POST** `/databases/<database_id>/archive`
 
-Toggles the archived status of a database.
-
-**Authentication:** Required
+Toggles the archived flag.
 
 **Response (200):**
 
 ```json
-{
-  "success": true,
-  "is_archived": "boolean"
-}
+{ "success": true, "is_archived": "boolean" }
 ```
 
 **Error Responses:**
 
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Database not found
 - `405`: Method not allowed
 
 ---
 
-### 7. Merge Databases
+### 7. Merge databases
 
 **POST** `/databases/merge`
 
-Merges two databases into a new database, archiving the source and target.
-
-**Authentication:** Required
+Creates a new database containing both source databases' transactions,
+archives the sources, and recalculates running balances.
 
 **Request Body:**
 
@@ -546,21 +853,18 @@ Merges two databases into a new database, archiving the source and target.
 {
   "sourceId": "string (required)",
   "targetId": "string (required)",
-  "name": "string (required, name for merged database)"
+  "name": "string (required, name for the merged database)"
 }
 ```
 
-**Response (200):**
-
-```json
-{
-}
-```
+**Response (200):** the newly created merged database.
 
 **Error Responses:**
 
-- `400`: Source, target, and name are required / Cannot merge a database with itself
+- `400`: Source, target, and name are required / Cannot merge a database
+  with itself
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Database not found
 - `405`: Method not allowed
 
@@ -568,13 +872,15 @@ Merges two databases into a new database, archiving the source and target.
 
 ## Transaction Endpoints
 
-### 1. List Database Transactions
+**Authentication:** Required on all of these. Creating a transaction
+requires Member or above (`CREATE_TXN` — Viewer cannot create); editing,
+voiding, and permanently deleting a voided transaction require Admin or
+Owner (`MODIFY_TXN`); approving requires Admin or Owner (`APPROVE`, and an
+Admin/Owner may approve their own transaction).
+
+### 1. List a database's transactions
 
 **GET** `/databases/<database_id>/transactions`
-
-Retrieves all transactions for a specific database.
-
-**Authentication:** Required
 
 **Response (200):**
 
@@ -586,19 +892,20 @@ Retrieves all transactions for a specific database.
     "type": "credit or debit",
     "amount": "float",
     "date": "ISO 8601 datetime",
-    "sender": "string or null",
-    "receiver": "string or null",
+    "sender": "string",
+    "receiver": "string",
     "mode": "electronic, cheque, or cash",
     "mode_data": {
-      "elecId": "string (if electronic mode)",
-      "chequeNo": "string (if cheque mode)",
-      "chequeDate": "string (if cheque mode)",
-      "chequeBank": "string (if cheque mode)"
+      "elecId": "string (electronic mode)",
+      "chequeNo": "string (cheque mode)",
+      "chequeDate": "string (cheque mode)",
+      "chequeBank": "string (cheque mode)"
     },
-    "location": "string or null",
-    "notes": "string or null",
+    "location": "string",
+    "notes": "string",
     "running_balance": "float",
-    "receipt_image": "string (base64) or null",
+    "receipt_key": "string or null (object storage key, not a URL)",
+    "receipt_url": "string or null (signed URL, valid ~1 hour, only present when storage is configured and receipt_key is set)",
     "requires_approval": "boolean",
     "approved": "boolean",
     "approved_by": "string or null",
@@ -607,10 +914,16 @@ Retrieves all transactions for a specific database.
     "void_reason": "string or null",
     "voided_by": "string or null",
     "voided_at": "ISO 8601 datetime or null",
+    "created_by": "string (user id)",
     "created_at": "ISO 8601 datetime"
   }
 ]
 ```
+
+There is no `receipt_image` field any more — receipts are objects in the
+org's own storage, referenced by `receipt_key` and read through a freshly
+signed `receipt_url` (never a permanent link). See
+[Receipt Endpoints](#receipt-endpoints) to attach one.
 
 **Error Responses:**
 
@@ -620,13 +933,9 @@ Retrieves all transactions for a specific database.
 
 ---
 
-### 2. Create Transaction
+### 2. Create a transaction
 
 **POST** `/databases/<database_id>/transactions`
-
-Creates a new transaction in a database.
-
-**Authentication:** Required
 
 **Request Body:**
 
@@ -645,17 +954,19 @@ Creates a new transaction in a database.
     "chequeBank": "string (for cheque mode)"
   },
   "location": "string (optional)",
-  "notes": "string (optional)",
-  "receiptImage": "string (base64 encoded image, optional)"
+  "notes": "string (optional)"
 }
 ```
+
+This no longer accepts `receiptImage` — a transaction is created without a
+receipt, then a receipt is attached separately with
+`POST /transactions/<id>/receipt`.
 
 **Response (200):**
 
 ```json
 {
-  "transaction": {
-  },
+  "transaction": { "...": "see List a database's transactions above" },
   "requiresApproval": "boolean",
   "newBalance": "float"
 }
@@ -663,27 +974,34 @@ Creates a new transaction in a database.
 
 **Behavior:**
 
-- If `amount >= approvalThreshold` and `approvalThreshold > 0`, transaction requires approval and `approved` is false
-- For approved transactions, the database balance is updated immediately
-- For pending approval, balance remains unchanged until approved
-- For debit transactions, balance cannot go negative (insufficient balance error)
+- Approval is required only when the creator is a Member and
+  `amount >= approvalThreshold > 0` — Owners and Admins never require
+  approval regardless of amount.
+- The fund's balance row is locked (`select_for_update`) before the balance
+  check and write, so two concurrent transactions against the same fund
+  cannot both pass an insufficient-balance check.
+- For approved-on-creation transactions the balance updates immediately; for
+  transactions pending approval it does not, until
+  [approved](#5-approve-a-transaction).
+- A debit cannot take the balance negative.
 
 **Error Responses:**
 
-- `400`: Invalid transaction type / Invalid transaction mode / Amount must be greater than 0 / Transaction date is required / Insufficient balance
+- `400`: Invalid transaction type / Invalid transaction mode / Amount must be
+  greater than 0 / Transaction date is required / Insufficient balance
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Database not found
 - `405`: Method not allowed
 
 ---
 
-### 3. Update Transaction
+### 3. Update a transaction
 
 **PUT** `/transactions/<transaction_id>`
 
-Updates an existing transaction (cannot be voided).
-
-**Authentication:** Required
+Cannot edit a voided transaction. Editing the amount or date recalculates
+running balances for the whole fund.
 
 **Request Body:**
 
@@ -698,209 +1016,200 @@ Updates an existing transaction (cannot be voided).
 }
 ```
 
-**Response (200):**
-
-```json
-{
-}
-```
+**Response (200):** the updated transaction (same shape as in the list
+endpoint above).
 
 **Error Responses:**
 
-- `400`: Enter a valid amount / Cannot edit a voided transaction / Transaction date is required
+- `400`: Enter a valid amount / Cannot edit a voided transaction /
+  Transaction date is required
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Transaction not found
 - `405`: Method not allowed
 
 ---
 
-### 4. Void Transaction
+### 4. Void a transaction
 
 **POST** `/transactions/<transaction_id>/void`
-
-Marks a transaction as voided with a reason.
-
-**Authentication:** Required
 
 **Request Body:**
 
 ```json
-{
-  "reason": "string (required)"
-}
+{ "reason": "string (required)" }
 ```
 
 **Response (200):**
 
 ```json
-{
-  "success": true
-}
+{ "success": true }
 ```
 
 **Error Responses:**
 
 - `400`: Void reason required / Transaction is already voided
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Transaction not found
 - `405`: Method not allowed
 
 ---
 
-### 5. Approve Transaction
+### 5. Approve a transaction
 
 **POST** `/transactions/<transaction_id>/approve`
 
-Approves a pending transaction (only for transactions with `requires_approval: true` and `approved: false`).
-
-**Authentication:** Required
+Only valid for a transaction with `requires_approval: true` and
+`approved: false`. The approver's own transaction may be approved — the
+compensating control for that is the audit trail (`created_by` and
+`approved_by` are both recorded), not a block.
 
 **Response (200):**
 
 ```json
-{
-  "success": true,
-  "newBalance": "float"
-}
+{ "success": true, "newBalance": "float" }
 ```
-
-**Behavior:**
-
-- Updates database balance
-- Sets `approved` to true, `approved_by` to username, `approved_at` to current timestamp
 
 **Error Responses:**
 
-- `400`: Cannot approve a voided transaction / Transaction is already approved / Transaction does not require approval / Insufficient balance to approve this debit transaction
+- `400`: Cannot approve a voided transaction / Transaction is already
+  approved / Transaction does not require approval / Insufficient balance to
+  approve this debit transaction
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Transaction not found
 - `405`: Method not allowed
 
 ---
 
-## Receipt Extraction Endpoints
+### 6. Permanently delete a voided transaction
 
-### 1. Extract Receipt Details from Image
+**DELETE** `/transactions/<transaction_id>/delete`
 
-**POST** `/transactions/extract-receipt/`
+Only valid for a transaction that is already voided; recalculates running
+balances for the fund afterward.
 
-Extracts transaction details from a receipt or transaction screenshot image using AI-powered recognition. Uses NVIDIA Nemotron 3 Nano Omni as primary provider with automatic fallback to Google Gemini 2.0 Flash.
+**Response (200):**
 
-**Authentication:** Required
+```json
+{ "success": true }
+```
+
+**Error Responses:**
+
+- `400`: Only voided transactions can be deleted
+- `401`: Unauthorized
+- `403`: You do not have permission to do that
+- `404`: Transaction not found
+- `405`: Method not allowed
+
+---
+
+## Receipt Endpoints
+
+Two separate endpoints: one extracts structured data from an image with AI
+(does not save anything), the other attaches an image to a transaction as
+its receipt (no AI involved). Both require `CREATE_TXN` (Member or above).
+
+### 1. Extract details from a receipt image
+
+**POST** `/extract-receipt`
+
+Uses the calling organisation's own configured AI provider(s) — see
+`GET|PUT /api/orgs/settings` — trying the primary first, then the fallback
+on any failure. There is no server-wide provider any more.
 
 **Request Body:**
 
 ```text
 Content-Type: multipart/form-data
 
-file: <image file (PNG, JPEG, WEBP)>
+image: <image file, up to 5 MB>
+```
+
+Note the field name is `image`, not `file`.
+
+**Response (200):** on success —
+
+```json
+{
+  "amount": "float or null",
+  "date": "ISO 8601 datetime string or null",
+  "sender": "string or null",
+  "receiver": "string or null",
+  "reference_id": "string or null",
+  "mode": "electronic, cheque, or cash, or null",
+  "confidence": "float, 0.0-1.0",
+  "_provider": "string (the configured model name that produced this result)"
+}
+```
+
+On failure, the response is `{"error": "string"}` — and note this is
+returned with HTTP `200`, *not* an error status, whenever extraction was
+attempted and failed (both providers errored, or the response couldn't be
+parsed as JSON). The only case that gets a non-200 status is no AI provider
+being configured at all for this organisation, which returns `503`.
+
+**Error Responses:**
+
+- `400`: No image file provided / Image must be less than 5 MB
+- `401`: Unauthorized
+- `403`: You do not have permission to do that
+- `405`: Method not allowed
+- `503`: Receipt extraction is not configured for this organisation. An
+  Owner can add an AI provider in organisation settings. (returned inside the
+  normal `{"error": ...}` body, not a separate shape)
+
+---
+
+### 2. Attach a receipt to a transaction
+
+**POST** `/transactions/<transaction_id>/receipt`
+
+Compresses and uploads the image to the organisation's configured object
+storage (max 1024px, JPEG quality 75) at
+`receipts/<database_id>/<transaction_id>.jpg`, and stores the object key on
+the transaction.
+
+**Request Body:**
+
+```text
+Content-Type: multipart/form-data
+
+image: <image file, up to 5 MB>
 ```
 
 **Response (200):**
 
 ```json
-{
-  "amount": "float (transaction amount, null if not found)",
-  "date": "ISO 8601 datetime string (null if not found)",
-  "sender": "string (payer/sender name, null if not found)",
-  "receiver": "string (payee/receiver name, null if not found)",
-  "reference_id": "string (UPI ref, UTR, transaction ID, null if not found)",
-  "mode": "string (electronic, cheque, or cash, null if not found)",
-  "confidence": "float (0.0-1.0, extraction confidence score)",
-  "_provider": "string (nvidia or gemini - which model was used)",
-  "_mock": "boolean (true if mock mode is enabled)"
-}
+{ "receipt_url": "string (freshly signed URL, valid ~1 hour)" }
 ```
-
-**Request Example:**
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/transactions/extract-receipt/ \
-  -H "Authorization: Bearer <token>" \
-  -F "file=@receipt.jpg"
-```
-
-**Supported Image Formats:**
-
-- PNG (.png)
-- JPEG (.jpg, .jpeg)
-- WebP (.webp)
-
-**Image Processing:**
-
-- Automatic image compression (max 1024x1024 pixels)
-- JPEG quality: 75%
-- Payload reduction: ~95%
-
-**Extraction Fields:**
-
-- **amount**: Transaction amount (numeric value)
-- **date**: Transaction date/time in ISO 8601 format
-- **sender**: Name or account identifier of the payer
-- **receiver**: Name or account identifier of the payee
-- **reference_id**: Transaction reference (UPI ID, UTR, etc.)
-- **mode**: Payment method used
-- **confidence**: AI confidence score (0.0 = no confidence, 1.0 = certain)
-
-**Provider Information:**
-
-- **Primary**: NVIDIA Nemotron 3 Nano Omni (`nvidia`)
-- **Fallback**: Google Gemini 2.0 Flash (`gemini`)
-- If primary provider fails, automatically retries with fallback
-- Response includes `_provider` field indicating which model was used
-
-**Mock Mode:**
-
-For development and testing without API calls, enable mock mode in `.env`:
-
-```env
-NVIDIA_RECEIPT_MOCK=true
-GEMINI_RECEIPT_MOCK=true
-```
-
-This returns a sample response without consuming API quota.
 
 **Error Responses:**
 
-- `400`: No image file provided / Invalid image format / Image processing failed
-- `401`: Unauthorized (missing/invalid token)
+- `400`: No image file provided / Image must be less than 5 MB / That file
+  is not a readable image
+- `401`: Unauthorized
+- `403`: You do not have permission to do that
+- `404`: Transaction not found
 - `405`: Method not allowed
-- `500`: Both AI providers failed (check error details)
-
-**Error Response Example:**
-
-```json
-{
-  "error": "Image processing failed: Invalid file format"
-}
-```
-
-Or if both providers fail:
-
-```json
-{
-  "error": "Both providers failed: NVIDIA: API quota exceeded | Gemini: Network error"
-}
-```
-
-**Typical Use Cases:**
-
-1. Automatic transaction entry from receipt photos
-2. Bulk import of historical transactions via receipt images
-3. Quick transaction logging from payment screenshots
-4. Audit trail with image-based verification
+- `502`: Could not upload the receipt: `<reason>`
+- `503`: Receipt storage is not configured for this organisation. An Owner
+  can add it in organisation settings. / a storage misconfiguration message
 
 ---
 
 ## Recurring Transaction Endpoints
 
-### 1. List Recurring Transactions
+**Authentication:** Required on all of these. Reading is open to any role;
+creating and deleting require Admin or Owner (`MANAGE_FUNDS`); processing due
+transactions requires Member or above (`CREATE_TXN`, since it posts real
+transactions).
+
+### 1. List recurring transactions
 
 **GET** `/databases/<database_id>/recurring`
-
-Retrieves all active recurring transactions for a database.
-
-**Authentication:** Required
 
 **Response (200):**
 
@@ -915,6 +1224,7 @@ Retrieves all active recurring transactions for a database.
     "description": "string",
     "next_run": "ISO 8601 date (YYYY-MM-DD)",
     "is_active": "boolean",
+    "created_by": "string (user id)",
     "created_at": "ISO 8601 datetime"
   }
 ]
@@ -928,13 +1238,9 @@ Retrieves all active recurring transactions for a database.
 
 ---
 
-### 2. Create Recurring Transaction
+### 2. Create a recurring transaction
 
 **POST** `/databases/<database_id>/recurring`
-
-Creates a new recurring transaction.
-
-**Authentication:** Required
 
 **Request Body:**
 
@@ -948,85 +1254,71 @@ Creates a new recurring transaction.
 }
 ```
 
-**Response (200):**
-
-```json
-{
-}
-```
+**Response (200):** the created recurring transaction (same shape as above).
 
 **Error Responses:**
 
-- `400`: Invalid transaction type / Amount must be greater than 0 / Invalid frequency / Description required / Invalid next run date
+- `400`: Invalid transaction type / Amount must be greater than 0 / Invalid
+  frequency / Description required / Invalid next run date
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Database not found
 - `405`: Method not allowed
 
 ---
 
-### 3. Delete Recurring Transaction
+### 3. Delete a recurring transaction
 
 **DELETE** `/recurring/<recurring_id>`
 
-Deactivates a recurring transaction (sets `is_active` to false).
-
-**Authentication:** Required
+Deactivates it (`is_active` becomes `false`) rather than removing the row.
 
 **Response (200):**
 
 ```json
-{
-  "success": true
-}
+{ "success": true }
 ```
 
 **Error Responses:**
 
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Recurring transaction not found
 - `405`: Method not allowed
 
 ---
 
-### 4. Process Recurring Transactions
+### 4. Process due recurring transactions
 
 **POST** `/recurring/process`
 
-Processes all due recurring transactions for the authenticated user, creating transactions automatically.
-
-**Authentication:** Required
+Creates a real transaction for every active recurring transaction whose
+`next_run` has passed, and advances `next_run`.
 
 **Response (200):**
 
 ```json
-{
-  "success": true,
-  "processed": "integer (number of transactions created)"
-}
+{ "success": true, "processed": "integer" }
 ```
-
-**Behavior:**
-
-- Checks all active recurring transactions with `next_run <= today`
-- Creates transactions automatically
-- Updates `next_run` to the next occurrence date based on frequency
 
 **Error Responses:**
 
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `405`: Method not allowed
 
 ---
 
 ## Audit Log Endpoints
 
-### 1. List Audit Logs
+**Authentication:** Required. No role gate.
+
+### 1. List audit logs
 
 **GET** `/audit`
 
-Retrieves audit logs for the authenticated user (limited to 500 most recent entries).
-
-**Authentication:** Required
+Returns entries created by the **calling user** (not the whole
+organisation), most recent 500 first.
 
 **Response (200):**
 
@@ -1034,11 +1326,11 @@ Retrieves audit logs for the authenticated user (limited to 500 most recent entr
 [
   {
     "id": "string",
-    "user_id": "string",
-    "action": "string (create, update, delete, login, logout, signup, etc.)",
-    "entity_type": "string (user, database, transaction, recurring, etc.)",
+    "user_id": "string or null",
+    "action": "string (create, update, delete, login, logout, void, etc.)",
+    "entity_type": "string (org, user, join_code, database, transaction, recurring, etc.)",
     "entity_id": "string or null",
-    "details": "string (human-readable description)",
+    "details": "string",
     "timestamp": "ISO 8601 datetime"
   }
 ]
@@ -1053,13 +1345,14 @@ Retrieves audit logs for the authenticated user (limited to 500 most recent entr
 
 ## Trash Management Endpoints
 
-### 1. List Trash Items
+**Authentication:** Required. Reading is open to any role; restoring,
+permanently deleting, and emptying trash require Admin or Owner
+(`MANAGE_FUNDS`). All of these operate on the **calling user's own** trash
+items (scoped by who deleted them), not the whole organisation's.
+
+### 1. List trash items
 
 **GET** `/trash`
-
-Retrieves all deleted items in the user's trash.
-
-**Authentication:** Required
 
 **Response (200):**
 
@@ -1067,10 +1360,10 @@ Retrieves all deleted items in the user's trash.
 [
   {
     "id": "string",
-    "entity_type": "string (database, etc.)",
-    "entity_data": "JSON string (original data of deleted item)",
+    "entity_type": "string (database)",
+    "entity_data": "JSON string (original data of the deleted item)",
     "deleted_at": "ISO 8601 datetime",
-    "deleted_by": "string (user_id who deleted it)"
+    "deleted_by": "string (user id)"
   }
 ]
 ```
@@ -1082,99 +1375,88 @@ Retrieves all deleted items in the user's trash.
 
 ---
 
-### 2. Restore Item from Trash
+### 2. Restore an item from trash
 
 **POST** `/trash/<item_id>/restore`
 
-Restores a deleted item from trash (only for databases).
-
-**Authentication:** Required
-
 **Response (200):**
 
 ```json
-{
-  "success": true
-}
+{ "success": true }
 ```
 
 **Error Responses:**
 
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Item not found
 - `405`: Method not allowed
 
 ---
 
-### 3. Delete Item Permanently
+### 3. Permanently delete an item
 
 **DELETE** `/trash/<item_id>`
 
-Permanently deletes an item from trash (cannot be recovered).
-
-**Authentication:** Required
-
 **Response (200):**
 
 ```json
-{
-  "success": true
-}
+{ "success": true }
 ```
 
 **Error Responses:**
 
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `404`: Item not found
 - `405`: Method not allowed
 
 ---
 
-### 4. Empty Trash
+### 4. Empty trash
 
 **DELETE** `/trash`
 
-Permanently deletes all items from user's trash.
-
-**Authentication:** Required
+Permanently deletes every item in the calling user's trash.
 
 **Response (200):**
 
 ```json
-{
-  "success": true
-}
+{ "success": true }
 ```
 
 **Error Responses:**
 
 - `401`: Unauthorized
+- `403`: You do not have permission to do that
 - `405`: Method not allowed
 
 ---
 
 ## Analytics Endpoints
 
-### 1. Get Overview Analytics
+**Authentication:** Required. No role gate.
+
+### 1. Get overview analytics
 
 **GET** `/analytics/overview`
 
-Retrieves summary analytics for all user's databases.
-
-**Authentication:** Required
+Totals across every non-deleted fund in the organisation.
 
 **Response (200):**
 
 ```json
 {
   "totalDatabases": "integer",
-  "totalBalance": "float (sum of all database balances)",
+  "totalBalance": "float (sum of all non-deleted funds' balances)",
   "totalCredits": "float (sum of all non-voided credit transactions)",
-  "totalDebits": "float (sum of all non-voided debit transactions)",
-  "monthlyData": "array (reserved for future use)",
-  "modeData": "array (reserved for future use)"
+  "totalDebits": "float (sum of all non-voided debit transactions)"
 }
 ```
+
+There are no `monthlyData` or `modeData` keys — the response has exactly the
+four fields above, whether or not the organisation has any funds yet (an org
+with zero funds gets the same shape, all zeros).
 
 **Error Responses:**
 
@@ -1183,123 +1465,124 @@ Retrieves summary analytics for all user's databases.
 
 ---
 
+## Permissions
+
+Every member of an organisation holds exactly one role, checked centrally
+(`apps.accounts.permissions`) rather than scattered per view:
+
+| Capability | Owner | Admin | Member | Viewer |
+|---|---|---|---|---|
+| View all funds and transactions | ✓ | ✓ | ✓ | ✓ |
+| Export / print reports and receipts | ✓ | ✓ | ✓ | ✓ |
+| Create transactions | ✓ | ✓ | ✓ | — |
+| Transaction requires approval when over threshold | — | — | ✓ | n/a |
+| Approve transactions (including own) | ✓ | ✓ | — | — |
+| Void / edit / delete transactions | ✓ | ✓ | — | — |
+| Create, edit, archive, delete funds | ✓ | ✓ | — | — |
+| Mint Member / Viewer join codes · manage members | ✓ | ✓ | — | — |
+| Mint Admin join codes | ✓ | — | — | — |
+| Change role of a member | ✓ | — | — | — |
+| Set database connection, storage, AI config | ✓ | — | — | — |
+| Transfer ownership | ✓ | — | — | — |
+
+Notes:
+
+- An organisation always has exactly one Owner; the sole Owner cannot be
+  demoted, deactivated, or deleted.
+- Self-approval is allowed by design — an Admin/Owner may approve their own
+  transaction. `created_by` and `approved_by` are both recorded on every
+  transaction, so a self-approval is always visible in the audit trail even
+  though it isn't blocked.
+- A `403` from any gated endpoint returns `{"error": "You do not have
+  permission to do that"}`, except the join-code endpoints, which return
+  `{"error": "Admin access required"}`.
+
+---
+
 ## Data Types & Enums
 
-### User Roles
+### User roles
 
-- `admin` - Full system access, can manage all users
-- `member` - Limited access, can only manage their own data
+- `owner` — full control, including database/storage/AI configuration and
+  ownership transfer; there is exactly one per organisation
+- `admin` — manages funds, transactions, and members, but not org
+  configuration or ownership
+- `member` — creates transactions; subject to the approval threshold
+- `viewer` — read-only
 
-### Transaction Types
+### Transaction types
 
-- `credit` - Money in / deposit
-- `debit` - Money out / withdrawal
+- `credit` — money in
+- `debit` — money out
 
-### Transaction Modes
+### Transaction modes
 
-- `electronic` - Electronic transfer (requires `elecId`)
-- `cheque` - Cheque payment (requires `chequeNo`, `chequeDate`, `chequeBank`)
-- `cash` - Cash transaction
+- `electronic` — electronic transfer (carries `elecId`)
+- `cheque` — cheque payment (carries `chequeNo`, `chequeDate`, `chequeBank`)
+- `cash` — cash transaction
 
-### AI Receipt Extraction Providers
+### AI provider types
 
-- `nvidia` - NVIDIA Nemotron 3 Nano Omni (primary provider, fast & efficient)
-- `gemini` - Google Gemini 2.0 Flash (fallback provider, high accuracy)
-- `mock` - Mock provider (development/testing, no API calls)
+- `openai_compatible` — any endpoint speaking the OpenAI chat-completions API
+  (NVIDIA NIM, OpenRouter, Groq, a local vLLM server, ...): configured with a
+  base URL, model name, and key
+- `gemini` — Google Gemini, via its own SDK: configured with a model name and
+  key, no base URL
 
-### Extraction Confidence Scores
+Each organisation configures its own primary and optional fallback provider
+independently; there is no shared or default provider.
 
-Confidence scores range from 0.0 to 1.0:
+### Recurring frequencies
 
-- `0.9-1.0` - High confidence (reliable extraction)
-- `0.7-0.9` - Medium confidence (usually accurate)
-- `0.5-0.7` - Low confidence (review recommended)
-- `0.0-0.5` - Very low confidence (manual verification needed)
+- `daily`, `weekly`, `monthly`, `yearly`
 
-### Recurring Frequencies
+### Common response codes
 
-- `daily` - Every day
-- `weekly` - Every 7 days
-- `monthly` - Every month (same date)
-- `yearly` - Every year (same date)
+- `200` — Success
+- `400` — Bad request (validation error)
+- `401` — Unauthorized (missing/invalid/expired token)
+- `403` — Forbidden (insufficient role, or wrong permission for the action)
+- `404` — Not found
+- `405` — Method not allowed
+- `500` — Unexpected server-side failure (e.g. owner-account creation during
+  org creation)
+- `502` — Upstream failure (receipt storage upload)
+- `503` — This organisation's dependency isn't reachable or configured
+  (tenant database, receipt storage, or AI provider)
 
-### Common Response Codes
+### Timestamp format
 
-- `200` - Success
-- `400` - Bad request (validation error)
-- `401` - Unauthorized (missing/invalid token)
-- `403` - Forbidden (insufficient permissions)
-- `404` - Not found (resource doesn't exist)
-- `405` - Method not allowed (wrong HTTP method)
-
-### Timestamp Format
-
-All timestamps are in ISO 8601 format with timezone information:
-
-- Example: `2024-05-23T10:16:48.756+05:30`
+ISO 8601 with timezone information, e.g. `2026-06-19T10:16:48.756+00:00`.
 
 ---
 
-## Authentication
+## Request/response format
 
-### Header Format
-
-```text
-Authorization: Bearer <token>
-```
-
-### Session Management
-
-- Tokens are generated upon signup/login
-- Tokens are invalidated upon logout
-- Admin password reset invalidates all user sessions except the reset request
-- User profile password change invalidates all other sessions (but keeps current session)
-
-### Error Example
+All requests and responses use JSON (`Content-Type: application/json`)
+except the two multipart file uploads noted above. Every error response has
+the shape:
 
 ```json
-{
-  "error": "Unauthorized"
-}
+{ "error": "string" }
 ```
 
----
+## Rate limiting
 
-## Request/Response Format
-
-All requests and responses use JSON format with `Content-Type: application/json`.
-
-### Error Response Format
-
-```json
-{
-  "error": "string (error message)"
-}
-```
-
----
-
-## Rate Limiting
-
-Currently, there is no rate limiting implemented. Production deployment should consider adding rate limiting.
-
----
-
-## Version History
-
-- **v2.0** - Added AI Receipt Extraction endpoint with dual provider support (NVIDIA + Gemini)
-- **v1.0** - Initial API documentation
-
----
+There is none. Each organisation supplies and pays for its own AI key, so
+usage is that organisation's decision — see the design spec for the
+reasoning. Two client-side behaviors substitute for a server-side limit:
+a failed extraction does not auto-retry, and an identical image hash within
+a session reuses its previous result rather than calling the provider again.
 
 ## Notes
 
-- All timestamps are stored in UTC with timezone offset information
-- Database balances are stored as floats
-- All entity IDs are unique strings (64 characters max)
-- Audit logs are maintained for all user actions for compliance
-- Deleted databases and transactions are soft-deleted by default (moved to trash)
-- Receipt extraction uses dual AI providers (NVIDIA Nemotron primary, Gemini fallback)
-- Receipt extraction automatically compresses images (~95% payload reduction)
-- All receipt extraction confidence scores are 0.0-1.0 floats
-- Mock mode for receipt extraction is configurable via environment variables for testing
+- All timestamps are stored in UTC with timezone offset information.
+- Fund balances and transaction amounts are stored as floats, not fixed-point
+  decimals.
+- Receipts are never stored inline as base64 — only an object key
+  (`receipt_key`) plus a signed URL minted at read time (`receipt_url`,
+  ~1 hour validity). An org without storage configured simply has no
+  `receipt_url` on any transaction and cannot attach new receipts, but
+  everything else works.
+- Audit logs and trash listings are scoped to the calling user, not the
+  whole organisation — see the notes on those sections above.
