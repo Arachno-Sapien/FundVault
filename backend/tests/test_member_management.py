@@ -8,7 +8,7 @@ from apps.accounts.models import Session, User
 from apps.common.auth import create_session_token
 from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
-from apps.orgs.models import Org
+from apps.orgs.models import EmailIndex, Org
 
 TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
 
@@ -35,7 +35,7 @@ class MemberManagementTests(TestCase):
 
     def setUp(self):
         self.client = Client()
-        Org.objects.create(
+        self.org = Org.objects.create(
             id="o1", name="Acme", slug="acme",
             owner_email="o@example.com", db_connection=TENANT_URL,
         )
@@ -45,6 +45,9 @@ class MemberManagementTests(TestCase):
 
     def _user(self, user_id, role):
         token = create_session_token(user_id, "o1")
+        # Joining an org writes the control-plane discovery row (see the spec's
+        # email_index section); every member here has one.
+        EmailIndex.objects.create(email=f"{user_id}@example.com", org=self.org)
         with org_context(ORG_ALIAS):
             User.objects.create(
                 id=user_id, username=user_id, email=f"{user_id}@example.com",
@@ -83,6 +86,48 @@ class MemberManagementTests(TestCase):
             content_type="application/json",
             HTTP_AUTHORIZATION=f"Bearer {token}",
         )
+
+    def _lookup(self, email):
+        """Org names /api/auth/orgs offers this address."""
+        response = self.client.post(
+            "/api/auth/orgs",
+            data=json.dumps({"email": email}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        return [org["name"] for org in json.loads(response.content)["orgs"]]
+
+    def _put_me(self, token, payload):
+        return self.client.put(
+            "/api/auth/me",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+
+    # --- email_index follows the member ---
+
+    def test_removing_a_member_ends_their_org_discovery(self):
+        self.assertEqual(self._lookup("u_member@example.com"), ["Acme"])
+        self.assertEqual(self._delete(self.admin, "u_member").status_code, 200)
+        self.assertEqual(self._lookup("u_member@example.com"), [])
+
+    def test_an_admin_changing_a_members_email_moves_their_org_discovery(self):
+        response = self._put(self.admin, "u_member", {"email": "moved@example.com"})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(self._lookup("u_member@example.com"), [])
+        self.assertEqual(self._lookup("moved@example.com"), ["Acme"])
+
+    def test_a_member_changing_their_own_email_moves_their_org_discovery(self):
+        response = self._put_me(self.member, {"username": "u_member", "email": "self@example.com"})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(self._lookup("u_member@example.com"), [])
+        self.assertEqual(self._lookup("self@example.com"), ["Acme"])
+
+    def test_a_profile_edit_that_keeps_the_email_leaves_discovery_alone(self):
+        response = self._put_me(self.member, {"username": "renamed", "email": "u_member@example.com"})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(self._lookup("u_member@example.com"), ["Acme"])
 
     # --- role changes: CHANGE_ROLE is Owner-only ---
 

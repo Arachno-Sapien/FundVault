@@ -9,6 +9,7 @@ from apps.accounts.permissions import Action, require
 from apps.accounts.serializers import serialize_user
 from apps.common.audit import add_audit
 from apps.common.auth import auth_required, create_session, create_session_token
+from apps.common.ratelimit import rate_limit
 from apps.common.utils import json_error, parse_body
 from apps.ledger.models import DatabaseFund, TransactionFund
 from apps.orgs.context import current_org_alias
@@ -48,6 +49,7 @@ def orgs_for_email(request):
 
 
 @csrf_exempt
+@rate_limit("login", max_attempts=15, window_seconds=60)
 def login(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
@@ -133,6 +135,7 @@ def me(request):
         # atomic block must open on that same alias -- a bare atomic() defaults
         # to "default", which is the wrong connection for this org's data.
         with transaction.atomic(using=current_org_alias()):
+            old_email = user.email
             user.username = next_username
             user.email = next_email
             user.profile_image = profile_image
@@ -140,6 +143,13 @@ def me(request):
                 user.password_hash = _hash_password(new_password)
             user.updated_at = timezone.now()
             user.save(update_fields=update_fields)
+            if next_email != old_email:
+                # Otherwise org discovery still answers to the old address and
+                # never to the new one. An email already indexed for this org
+                # trips uniq_email_per_org -> IntegrityError, handled below.
+                EmailIndex.objects.filter(email=old_email, org=request.fv_org).update(
+                    email=next_email, last_seen_at=timezone.now()
+                )
             if new_password:
                 Session.objects.filter(user_id=user.id).exclude(token=request.fv_token).delete()
     except IntegrityError:
@@ -222,12 +232,18 @@ def admin_user_detail(request, user_id):
         try:
             # Tenant-routed model -- see the comment on `me` above.
             with transaction.atomic(using=current_org_alias()):
+                old_email = target.email
                 target.username = next_username
                 target.email = next_email
                 target.role = next_role
                 target.is_active = next_is_active
                 target.updated_at = timezone.now()
                 target.save(update_fields=["username", "email", "role", "is_active", "updated_at"])
+                if next_email != old_email:
+                    # Keep org discovery pointed at the address they now use.
+                    EmailIndex.objects.filter(email=old_email, org=request.fv_org).update(
+                        email=next_email, last_seen_at=timezone.now()
+                    )
                 if not next_is_active:
                     Session.objects.filter(user_id=target.id).delete()
         except IntegrityError:
@@ -255,6 +271,10 @@ def admin_user_detail(request, user_id):
             TrashItem.objects.filter(deleted_by_id=target.id).delete()
             AuditLog.objects.filter(user_id=target.id).update(user_id=None)
             Session.objects.filter(user_id=target.id).delete()
+            # Discovery row lives in the control plane, not this tenant -- but
+            # leaving it behind keeps offering this org to someone who is no
+            # longer a member.
+            EmailIndex.objects.filter(email=target.email, org=request.fv_org).delete()
             target.delete()
 
         add_audit(

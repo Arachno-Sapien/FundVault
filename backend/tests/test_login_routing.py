@@ -2,6 +2,7 @@ import json
 from datetime import timedelta
 
 import bcrypt
+from django.core.cache import cache
 from django.test import Client, TestCase
 from django.utils import timezone
 
@@ -80,6 +81,10 @@ class LoginTests(TestCase):
         super().setUpClass()
 
     def setUp(self):
+        # login is rate limited per IP on Django's cache, and LocMemCache is one
+        # dict for the whole test run — without this, the burst test below would
+        # leave every later login in this process refused with a 429.
+        cache.clear()
         self.client = Client()
         self.org = Org.objects.create(
             id="o1", name="Acme", slug="acme",
@@ -124,6 +129,16 @@ class LoginTests(TestCase):
         self._login()
         after = EmailIndex.objects.get(email="alice@example.com").last_seen_at
         self.assertGreater(after, before)
+
+    def test_repeated_failed_logins_are_eventually_refused(self):
+        # 15 per IP per minute. An unknown username fails before bcrypt runs,
+        # so the burst costs no hashing time.
+        for attempt in range(15):
+            self.assertEqual(self._login(username="nobody").status_code, 401, attempt)
+        self.assertEqual(self._login(username="nobody").status_code, 429)
+        # The budget is per IP, not per account: the right password does not
+        # buy a way around it.
+        self.assertEqual(self._login().status_code, 429)
 
     def test_public_signup_is_gone(self):
         response = self.client.post(
