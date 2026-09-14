@@ -239,7 +239,13 @@ def join_codes(request):
         expires_at=timezone.now() + timedelta(days=days),
         max_uses=max_uses,
     )
-    add_audit(actor.id, "create", "join_code", _mask(code.code), f"Join code created granting {role}")
+    # The code itself never goes in the audit trail, masked or not: its
+    # FUNDVAULT-XXXX-XXXX format has only 8 secret characters wrapped in a
+    # constant prefix, so a length-based mask (see _mask below) still shows
+    # half of them — and the unauthenticated, unthrottled join-preview
+    # endpoint turns the rest into a practical brute force. The JoinCode row
+    # itself is the authoritative record.
+    add_audit(actor.id, "create", "join_code", None, f"Join code created granting {role}")
     return JsonResponse(
         {
             "code": code.code,
@@ -262,7 +268,7 @@ def revoke_join_code(request, code):
     updated = JoinCode.objects.filter(code=code, org=request.fv_org).update(revoked=True)
     if not updated:
         return json_error("Join code not found", 404)
-    add_audit(request.fv_user.id, "delete", "join_code", _mask(code), "Join code revoked")
+    add_audit(request.fv_user.id, "delete", "join_code", None, "Join code revoked")
     return JsonResponse({"success": True})
 
 
