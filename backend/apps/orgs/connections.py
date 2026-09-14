@@ -12,6 +12,8 @@ from urllib.parse import unquote, urlparse
 
 from django.db import connections
 
+from apps.common.utils import libpq_options
+
 MAX_TENANT_CONNECTIONS = 50
 
 _lru = OrderedDict()
@@ -50,7 +52,7 @@ def build_config(url):
         "AUTOCOMMIT": True,
         "CONN_MAX_AGE": 60,
         "CONN_HEALTH_CHECKS": True,
-        "OPTIONS": {},
+        "OPTIONS": libpq_options(parsed.query, parsed.hostname),
         "TIME_ZONE": None,
         "TEST": {
             "CHARSET": None,
