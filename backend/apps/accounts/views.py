@@ -35,6 +35,9 @@ def _other_active_owner_count(user_id):
 
 
 @csrf_exempt
+# Unauthenticated, and it answers "does this address belong to anyone here" for
+# any string handed to it — an enumeration oracle unless it costs something.
+@rate_limit("orgs_for_email", max_attempts=20, window_seconds=60)
 def orgs_for_email(request):
     """Which organisations does this email belong to? Discovery only."""
     if request.method != "POST":

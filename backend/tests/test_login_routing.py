@@ -28,6 +28,12 @@ class OrgDiscoveryTests(TestCase):
     databases = {"default", "tenant_dev"}
 
     def setUp(self):
+        # The lookup is rate limited per IP on Django's cache, and LocMemCache
+        # is one dict for the whole test run: clear on the way in so an earlier
+        # module cannot refuse these lookups, and on the way out because the
+        # burst test below leaves a counter at its limit.
+        cache.clear()
+        self.addCleanup(cache.clear)
         self.client = Client()
         self.first = Org.objects.create(
             id="o1", name="Acme Funds", slug="acme",
@@ -40,11 +46,12 @@ class OrgDiscoveryTests(TestCase):
         EmailIndex.objects.create(email="x@example.com", org=self.first)
         EmailIndex.objects.create(email="x@example.com", org=self.second)
 
-    def _lookup(self, email):
+    def _lookup(self, email, ip="10.0.0.1"):
         return self.client.post(
             "/api/auth/orgs",
             data=json.dumps({"email": email}),
             content_type="application/json",
+            REMOTE_ADDR=ip,
         )
 
     def test_lists_every_org_for_the_email(self):
@@ -60,6 +67,19 @@ class OrgDiscoveryTests(TestCase):
 
     def test_lookup_is_case_insensitive(self):
         self.assertEqual(len(json.loads(self._lookup("X@Example.com").content)["orgs"]), 2)
+
+    def test_email_enumeration_is_capped_per_ip(self):
+        # 20 per IP per minute. Unknown addresses answer 200 with an empty
+        # list, so without a cap this is a free "is this person a customer"
+        # oracle over any address list.
+        for attempt in range(20):
+            self.assertEqual(self._lookup("nobody@example.com").status_code, 200, attempt)
+        refused = self._lookup("nobody@example.com")
+        self.assertEqual(refused.status_code, 429)
+        self.assertIn("Too many requests", json.loads(refused.content)["error"])
+        # Per IP, not per address: a fresh address does not buy a way around it.
+        self.assertEqual(self._lookup("x@example.com").status_code, 429)
+        self.assertEqual(self._lookup("x@example.com", ip="10.0.0.2").status_code, 200)
 
     def test_no_credentials_are_returned(self):
         text = self._lookup("x@example.com").content.decode("utf-8")

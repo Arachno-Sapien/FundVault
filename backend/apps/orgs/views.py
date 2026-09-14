@@ -136,6 +136,10 @@ def join_preview(request):
 
 
 @csrf_exempt
+# Same budget as join_preview above, and for the same reason: this is the
+# other half of the join-code guessing surface, and the half that actually
+# mints an account when a guess lands.
+@rate_limit("join_org", max_attempts=20, window_seconds=60)
 def join_org(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)

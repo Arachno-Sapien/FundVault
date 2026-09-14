@@ -1591,12 +1591,19 @@ it, however many landed after that.
 | `POST /api/auth/login` | 15 per minute |
 | `POST /api/orgs/validate-connection` | 20 per minute |
 | `POST /api/orgs/join/preview` | 20 per minute |
+| `POST /api/orgs/join` | 20 per minute |
+| `POST /api/auth/orgs` | 20 per minute |
 | `POST /api/orgs/create` | 8 per hour |
 
+`GET /api/health` is the one exception: it is read-only, costs nothing and
+returns nothing sensitive.
+
 Org creation is the tight one: every call opens a real outbound connection to
-a caller-supplied database and runs a full migration against it. Login and
-join preview are capped because each answers a guess — a password, a join
-code — so the limit raises the cost of a brute force without ending it.
+a caller-supplied database and runs a full migration against it. Login, join
+preview and join are capped because each answers a guess — a password, a join
+code — so the limit raises the cost of a brute force without ending it. The
+org lookup is capped because it answers "does this email belong to anyone
+here" for any address handed to it.
 
 Counters live in Django's cache, left at the default LocMemCache: per
 process, so a deployment running N workers effectively allows N times the
