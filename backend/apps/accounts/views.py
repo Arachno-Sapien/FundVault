@@ -287,6 +287,16 @@ def admin_reset_password(request, user_id):
     if not target:
         return json_error("User not found", 404)
 
+    # Resetting the Owner's password hands over the Owner account: the actor
+    # can then log in as Owner and gains MANAGE_ORG_CONFIG, which
+    # MANAGE_MEMBERS (Admin) is not meant to grant. Gate that one target on
+    # the same capability a real handover needs, matching how admin_user_detail
+    # refuses to set role=owner and transfer_ownership gates itself.
+    if target.role == User.Role.OWNER:
+        denied = require(request.fv_user, Action.TRANSFER_OWNERSHIP)
+        if denied:
+            return denied
+
     # Tenant-routed model -- see the comment on `me` above.
     with transaction.atomic(using=current_org_alias()):
         target.password_hash = _hash_password(new_password)

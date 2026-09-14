@@ -161,3 +161,11 @@ class MemberManagementTests(TestCase):
 
     def test_admin_can_reset_a_members_password(self):
         self.assertEqual(self._reset_password(self.admin, "u_member").status_code, 200)
+
+    def test_admin_cannot_reset_the_owners_password(self):
+        # Otherwise MANAGE_MEMBERS (Admin) is a path to the Owner account:
+        # set a known password, log in as Owner, gain MANAGE_ORG_CONFIG.
+        self.assertEqual(self._reset_password(self.admin, "u_owner").status_code, 403)
+
+    def test_owner_can_reset_their_own_password(self):
+        self.assertEqual(self._reset_password(self.owner, "u_owner").status_code, 200)
