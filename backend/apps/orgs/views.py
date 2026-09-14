@@ -21,6 +21,7 @@ from apps.accounts.permissions import Action, require
 from apps.accounts.serializers import serialize_user
 from apps.common.audit import add_audit
 from apps.common.auth import auth_required, create_session, create_session_token
+from apps.common.ratelimit import rate_limit
 from apps.common.utils import json_error, parse_body, uid
 from apps.orgs.connections import InvalidConnectionString, ensure_connection
 from apps.orgs.context import org_context
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 @csrf_exempt
+@rate_limit("validate_connection", max_attempts=20, window_seconds=60)
 def validate_connection(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
@@ -43,6 +45,10 @@ def validate_connection(request):
 
 
 @csrf_exempt
+# Tight on purpose: every call that gets past validation opens a real outbound
+# connection and runs a full `manage.py migrate` against it. Nobody legitimately
+# creates eight organisations an hour from one address.
+@rate_limit("create_org", max_attempts=8, window_seconds=3600)
 def create_org(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
@@ -118,6 +124,7 @@ def _usable_code_or_error(raw_code):
 
 
 @csrf_exempt
+@rate_limit("join_preview", max_attempts=20, window_seconds=60)
 def join_preview(request):
     if request.method != "POST":
         return json_error("Method not allowed", 405)
@@ -242,8 +249,9 @@ def join_codes(request):
     # The code itself never goes in the audit trail, masked or not: its
     # FUNDVAULT-XXXX-XXXX format has only 8 secret characters wrapped in a
     # constant prefix, so a length-based mask (see _mask below) still shows
-    # half of them — and the unauthenticated, unthrottled join-preview
-    # endpoint turns the rest into a practical brute force. The JoinCode row
+    # half of them — and the unauthenticated join-preview endpoint (per-IP
+    # rate-limited, which raises the cost of a brute force but does not end it)
+    # turns the rest into a practical brute force. The JoinCode row
     # itself is the authoritative record.
     add_audit(actor.id, "create", "join_code", None, f"Join code created granting {role}")
     return JsonResponse(

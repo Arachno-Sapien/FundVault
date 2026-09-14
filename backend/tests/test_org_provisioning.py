@@ -1,6 +1,7 @@
 import json
 from unittest import mock
 
+from django.core.cache import cache
 from django.test import Client, TestCase
 
 from apps.orgs import connections as tenant_connections
@@ -69,6 +70,12 @@ class SSRFProtectionTests(TestCase):
     """
 
     databases = {"default", "tenant_dev"}
+
+    def setUp(self):
+        # These endpoints are per-IP rate limited and every test here shares
+        # one IP and one process-wide LocMemCache counter. Without this, tests
+        # start failing with 429s once enough of them have run.
+        cache.clear()
 
     def test_loopback_on_a_non_allowlisted_port_is_rejected(self):
         result = check_connection("postgres://u:p@127.0.0.1:5555/db")
@@ -209,6 +216,7 @@ class CreateOrgEndpointTests(TestCase):
         super().setUpClass()
 
     def setUp(self):
+        cache.clear()  # see SSRFProtectionTests.setUp
         self.client = Client()
 
     def _post(self, payload):
@@ -310,6 +318,9 @@ class CreateOrgEndpointTests(TestCase):
 class ValidateConnectionEndpointTests(TestCase):
     databases = {"default", "tenant_dev"}
 
+    def setUp(self):
+        cache.clear()  # see SSRFProtectionTests.setUp
+
     def test_reports_success_without_creating_anything(self):
         response = Client().post(
             "/api/orgs/validate-connection",
@@ -319,3 +330,51 @@ class ValidateConnectionEndpointTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(json.loads(response.content)["ok"])
         self.assertEqual(Org.objects.count(), 0)
+
+
+class PublicEndpointRateLimitTests(TestCase):
+    """Both endpoints are unauthenticated, and both cost real work per call:
+    create runs a full migrate against a caller-supplied host, validate opens
+    an outbound connection to one. The limit is charged before the view runs,
+    so these exhaust it with payloads that are refused as invalid -- no
+    provisioning, no sockets, just the counter.
+    """
+
+    databases = {"default"}
+
+    def setUp(self):
+        cache.clear()
+        # These tests deliberately leave a counter at its limit; without this
+        # the next test module to call the same endpoint would inherit it.
+        self.addCleanup(cache.clear)
+        self.client = Client()
+
+    def _post(self, path, payload):
+        return self.client.post(
+            path, data=json.dumps(payload), content_type="application/json"
+        )
+
+    def test_create_org_is_capped_per_ip(self):
+        for attempt in range(8):
+            response = self._post("/api/orgs/create", {"name": "Acme"})
+            self.assertEqual(response.status_code, 400, f"attempt {attempt + 1}")
+
+        refused = self._post("/api/orgs/create", {"name": "Acme"})
+        self.assertEqual(refused.status_code, 429)
+        self.assertIn("Too many requests", json.loads(refused.content)["error"])
+
+    def test_validate_connection_is_capped_per_ip(self):
+        for attempt in range(20):
+            response = self._post("/api/orgs/validate-connection", {"databaseUrl": ""})
+            self.assertEqual(response.status_code, 400, f"attempt {attempt + 1}")
+
+        self.assertEqual(
+            self._post("/api/orgs/validate-connection", {"databaseUrl": ""}).status_code, 429
+        )
+
+    def test_the_two_endpoints_do_not_share_a_budget(self):
+        for _ in range(9):
+            self._post("/api/orgs/create", {"name": "Acme"})
+        self.assertEqual(
+            self._post("/api/orgs/validate-connection", {"databaseUrl": ""}).status_code, 400
+        )

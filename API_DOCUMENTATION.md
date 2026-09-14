@@ -1554,6 +1554,7 @@ independently; there is no shared or default provider.
 - `403` — Forbidden (insufficient role, or wrong permission for the action)
 - `404` — Not found
 - `405` — Method not allowed
+- `429` — Too many requests from this IP (see [Rate limiting](#rate-limiting))
 - `500` — Unexpected server-side failure (e.g. owner-account creation during
   org creation)
 - `502` — Upstream failure (receipt storage upload)
@@ -1578,11 +1579,43 @@ the shape:
 
 ## Rate limiting
 
-There is none. Each organisation supplies and pays for its own AI key, so
-usage is that organisation's decision — see the design spec for the
-reasoning. Two client-side behaviors substitute for a server-side limit:
-a failed extraction does not auto-retry, and an identical image hash within
-a session reuses its previous result rather than calling the provider again.
+### Per-IP limits on the unauthenticated endpoints
+
+Every endpoint reachable without a token is capped per client IP. Past the
+cap the call is refused with `429` and the usual `{ "error": ... }` body. The
+window is fixed, not sliding: it expires a set time after the *first* call in
+it, however many landed after that.
+
+| Endpoint | Limit |
+| --- | --- |
+| `POST /api/auth/login` | 15 per minute |
+| `POST /api/orgs/validate-connection` | 20 per minute |
+| `POST /api/orgs/join/preview` | 20 per minute |
+| `POST /api/orgs/create` | 8 per hour |
+
+Org creation is the tight one: every call opens a real outbound connection to
+a caller-supplied database and runs a full migration against it. Login and
+join preview are capped because each answers a guess — a password, a join
+code — so the limit raises the cost of a brute force without ending it.
+
+Counters live in Django's cache, left at the default LocMemCache: per
+process, so a deployment running N workers effectively allows N times the
+numbers above, and a restart resets them. Pointing `CACHES` at a shared
+backend fixes both with no change to the endpoints.
+
+Authenticated endpoints have no per-IP limit — the session token and the
+caller's role are the limit there.
+
+### AI extraction has no usage cap
+
+This one is deliberate, not an omission, and is separate from the per-IP
+limits above: those bound abuse of endpoints that cost *this* server work,
+whereas extraction spends the organisation's own money. Each organisation
+supplies and pays for its own AI key, so how much it extracts is that
+organisation's decision — see the design spec for the reasoning. Two
+client-side behaviors keep the obvious waste down: a failed extraction does
+not auto-retry, and an identical image hash within a session reuses its
+previous result rather than calling the provider again.
 
 ## Notes
 
