@@ -2,7 +2,12 @@ import json
 
 from django.test import SimpleTestCase
 
-from apps.ledger.storage import StorageNotConfigured, parse_storage_config, receipt_key_for
+from apps.ledger.storage import (
+    StorageNotConfigured,
+    _client,
+    parse_storage_config,
+    receipt_key_for,
+)
 
 VALID = json.dumps({
     "endpoint_url": "https://abc.supabase.co/storage/v1/s3",
@@ -30,6 +35,27 @@ class ParseTests(SimpleTestCase):
         incomplete = json.dumps({"endpoint_url": "https://x", "access_key": "k", "secret_key": "s"})
         with self.assertRaises(StorageNotConfigured):
             parse_storage_config(incomplete)
+
+
+class ClientCacheTests(SimpleTestCase):
+    """Building a boto3 client costs tens of ms; a transaction list builds one per row."""
+
+    def setUp(self):
+        _client.cache_clear()
+        self.addCleanup(_client.cache_clear)
+
+    def test_equal_configs_share_one_client(self):
+        self.assertIs(
+            _client(parse_storage_config(VALID)), _client(parse_storage_config(VALID))
+        )
+
+    def test_different_config_gets_its_own_client(self):
+        other = json.loads(VALID)
+        other["access_key"] = "other-key"
+        self.assertIsNot(
+            _client(parse_storage_config(VALID)),
+            _client(parse_storage_config(json.dumps(other))),
+        )
 
 
 class KeyTests(SimpleTestCase):

@@ -5,6 +5,7 @@ serialisation time, so a receipt is never fetchable by anyone who guesses a
 path, and a URL that leaks stops working within the hour.
 """
 
+import functools
 import json
 import re
 from dataclasses import dataclass, field
@@ -17,7 +18,9 @@ class StorageNotConfigured(Exception):
     """This organisation has no usable storage configuration."""
 
 
-@dataclass
+# frozen: nothing mutates a config after parse_storage_config builds it, and
+# frozen makes it hashable, which is what lets _client below be lru_cached.
+@dataclass(frozen=True)
 class StorageConfig:
     endpoint_url: str
     bucket: str
@@ -54,6 +57,12 @@ def receipt_key_for(fund_id, transaction_id):
     return f"receipts/{fund_id}/{transaction_id}.jpg"
 
 
+# boto3.client() builds a fresh Session and re-parses the S3 service model off
+# disk every call — tens to hundreds of ms — and serialising a transaction list
+# calls this once per row (serialize_transaction -> _receipt_url -> signed_url).
+# botocore clients are thread-safe for making calls, so one per credential set
+# is enough. maxsize bounds it: a long-lived process can serve many orgs.
+@functools.lru_cache(maxsize=64)
 def _client(config):
     import boto3
 
