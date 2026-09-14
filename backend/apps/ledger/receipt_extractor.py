@@ -267,10 +267,27 @@ def extract_from_receipt_image(image_bytes, mime_type, config):
 
 
 def check_ai_config(config):
-    """Probe a provider cheaply so a bad key surfaces in settings, not at first use."""
+    """Probe a provider cheaply so a bad key surfaces in settings, not at first use.
+
+    Also the write-time SSRF gate for `base_url` (see check_storage in
+    apps.ledger.storage for the same reasoning). Gemini needs no check: its
+    endpoint is fixed by the SDK, not supplied by the org.
+    """
     target = config.get("primary") or config.get("fallback")
     if not target:
         return False, "No provider configured."
+
+    from apps.orgs.provisioning import blocked_https_url_message
+
+    # Both slots, not just the one probed below: the fallback is persisted by
+    # the same request and dialled later, at extraction time.
+    for candidate in (config.get("primary"), config.get("fallback")):
+        if candidate is None or candidate.provider != "openai_compatible":
+            continue
+        blocked = blocked_https_url_message(candidate.base_url)
+        if blocked:
+            return False, blocked
+
     try:
         if target.provider == "gemini":
             from google import genai

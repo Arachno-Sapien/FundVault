@@ -9,6 +9,7 @@ an unknown state.
 import ipaddress
 import socket
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import psycopg
 from django.conf import settings
@@ -20,7 +21,7 @@ from apps.common.utils import uid
 from apps.orgs.connections import alias_for_org, build_config, drop_connection
 from apps.orgs.models import Org
 
-_BLOCKED_TARGET_MESSAGE = "That host cannot be used for a tenant database connection."
+_BLOCKED_TARGET_MESSAGE = "That host cannot be used."
 
 
 def _is_internal_address(ip_str):
@@ -36,30 +37,63 @@ def _is_internal_address(ip_str):
     )
 
 
-def _blocked_target_message(host, port):
-    """Refuse to probe an internal/private address for either public endpoint.
+def resolve_target(host, port):
+    """Refuse to dial an internal/private address on a tenant-supplied target.
 
-    Both `validate-connection` and `create` are unauthenticated self-service
-    signup — an anonymous caller supplies the host. Without this, they could
-    point the probe at 127.0.0.1, the cloud metadata IP (169.254.169.254), or
-    any other internal-only address and read the (already-scrubbed) result as
-    a port-scan oracle. Returns None when the target is fine to probe, else a
-    generic message safe to hand back to the caller.
+    Everywhere a tenant names an outbound host — `validate-connection` and
+    `create` (both unauthenticated self-service signup), plus the object
+    storage endpoint and AI base URL an Owner saves in org settings — the
+    caller is untrusted. Without this they could point us at 127.0.0.1, the
+    cloud metadata IP (169.254.169.254), or any other internal-only address
+    and read the (already-scrubbed) result as a port-scan oracle.
+
+    Returns `(ip, None)` for a target that is safe to dial, else
+    `(None, message)` with a generic message safe to hand back to the caller.
+    `ip` is the exact address validated here: pass it to the connect call so
+    the socket lands on what was checked rather than on a second, independent
+    DNS lookup, which a low-TTL record can answer differently (rebinding).
+    `(None, None)` means the name did not resolve at all — let the real
+    connection attempt fail with its own message.
 
     `FUNDVAULT_TENANT_HOST_ALLOWLIST` is a narrow, exact (host, port)
     allowlist for local dev/test Postgres servers, which legitimately run on
     loopback — everything else at a private/loopback/link-local/reserved
     address is still blocked.
     """
-    if (host, port) in getattr(settings, "FUNDVAULT_TENANT_HOST_ALLOWLIST", frozenset()):
-        return None
+    allowlisted = (host, port) in getattr(
+        settings, "FUNDVAULT_TENANT_HOST_ALLOWLIST", frozenset()
+    )
     try:
-        addrs = {info[4][0] for info in socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)}
+        addrs = [info[4][0] for info in socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)]
     except socket.gaierror:
-        return None  # let the real connection attempt fail with its own message
-    if any(_is_internal_address(addr) for addr in addrs):
-        return _BLOCKED_TARGET_MESSAGE
-    return None
+        return None, None
+    if not addrs:
+        return None, None
+    if not allowlisted and any(_is_internal_address(addr) for addr in addrs):
+        return None, _BLOCKED_TARGET_MESSAGE
+    # Pinning to the first answer gives up DNS-level failover across a
+    # multi-address record; that is the price of checking and dialling the
+    # same address.
+    return addrs[0], None
+
+
+def blocked_https_url_message(url):
+    """Guard a tenant-supplied outbound HTTPS target. None when it is fine.
+
+    https-only: both call sites (receipt object storage, AI provider) send
+    the org's own credentials to this URL, so plaintext is never acceptable
+    regardless of where the host points.
+    """
+    try:
+        parsed = urlparse(url or "")
+        host, port = parsed.hostname, parsed.port or 443
+    except ValueError:
+        return "That URL is not usable — check the address."
+    if parsed.scheme != "https":
+        return "That URL must use https."
+    if not host:
+        return "That URL has no host."
+    return resolve_target(host, port)[1]
 
 
 class ProvisioningError(Exception):
@@ -119,10 +153,17 @@ def check_connection(url):
         # malformed URL always produces a clean result, never a 500.
         return ConnectionCheck(ok=False, message=str(exc))
 
-    blocked = _blocked_target_message(config["HOST"], int(config["PORT"]))
+    ip, blocked = resolve_target(config["HOST"], int(config["PORT"]))
     if blocked:
         return ConnectionCheck(ok=False, message=blocked)
 
+    # hostaddr pins the socket to the address resolve_target just validated,
+    # so a low-TTL record cannot answer this connect() with an internal
+    # address after passing the check above. `host` is still passed, because
+    # that is what drives TLS SNI and certificate hostname verification.
+    # hostaddr is omitted when the name did not resolve at all — psycopg then
+    # resolves it itself and fails with its own "host not found".
+    extra = {"hostaddr": ip} if ip else {}
     try:
         with psycopg.connect(
             host=config["HOST"],
@@ -131,6 +172,7 @@ def check_connection(url):
             user=config["USER"],
             password=config["PASSWORD"],
             connect_timeout=10,
+            **extra,
         ) as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT version()")

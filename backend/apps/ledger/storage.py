@@ -94,7 +94,20 @@ def _redact(message, config):
 
 
 def check_storage(config):
-    """Round-trip a tiny object to prove the credentials work."""
+    """Round-trip a tiny object to prove the credentials work.
+
+    This is the write-time gate (called from org_settings PUT before the
+    config is persisted), which is also the right place for the SSRF check:
+    the endpoint is tenant-supplied and org creation is unauthenticated
+    self-service. parse_storage_config deliberately stays free of it — that
+    one runs on every ledger read and must not do a DNS lookup per request.
+    """
+    from apps.orgs.provisioning import blocked_https_url_message
+
+    blocked = blocked_https_url_message(config.endpoint_url)
+    if blocked:
+        return False, blocked
+
     probe = "receipts/_fundvault_probe"
     try:
         client = _client(config)
