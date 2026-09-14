@@ -925,6 +925,12 @@ org's own storage, referenced by `receipt_key` and read through a freshly
 signed `receipt_url` (never a permanent link). See
 [Receipt Endpoints](#receipt-endpoints) to attach one.
 
+For `electronic` and `cheque` transactions, the same values nested under
+`mode_data` are also duplicated as flattened top-level keys (`elecId`, or
+`chequeNo`/`chequeDate`/`chequeBank`) alongside the fields above, present
+only when set. `mode_data` is the canonical field; the flattened keys exist
+for convenience and always mirror it.
+
 **Error Responses:**
 
 - `401`: Unauthorized
@@ -1317,8 +1323,10 @@ Creates a real transaction for every active recurring transaction whose
 
 **GET** `/audit`
 
-Returns entries created by the **calling user** (not the whole
-organisation), most recent 500 first.
+Returns the **whole organisation's** audit trail (not just the calling
+user's own actions), most recent 500 first. The tenant database connection
+is already the org boundary, so no additional per-user filter is applied —
+every member, including Viewer, can see every other member's actions.
 
 **Response (200):**
 
@@ -1347,8 +1355,9 @@ organisation), most recent 500 first.
 
 **Authentication:** Required. Reading is open to any role; restoring,
 permanently deleting, and emptying trash require Admin or Owner
-(`MANAGE_FUNDS`). All of these operate on the **calling user's own** trash
-items (scoped by who deleted them), not the whole organisation's.
+(`MANAGE_FUNDS`). All of these operate on the **whole organisation's** trash
+— an Admin or Owner can restore or delete any member's deleted item, not
+just their own.
 
 ### 1. List trash items
 
@@ -1417,7 +1426,7 @@ items (scoped by who deleted them), not the whole organisation's.
 
 **DELETE** `/trash`
 
-Permanently deletes every item in the calling user's trash.
+Permanently deletes every item in the organisation's trash.
 
 **Response (200):**
 
@@ -1454,9 +1463,10 @@ Totals across every non-deleted fund in the organisation.
 }
 ```
 
-There are no `monthlyData` or `modeData` keys — the response has exactly the
-four fields above, whether or not the organisation has any funds yet (an org
-with zero funds gets the same shape, all zeros).
+When the organisation has no funds yet, the response instead has six keys —
+the four above (all zero) plus two empty placeholder arrays, `monthlyData`
+and `modeData`. Neither key is populated in the normal (non-zero) response
+above, and neither is currently consumed by the frontend.
 
 **Error Responses:**
 
@@ -1584,5 +1594,8 @@ a session reuses its previous result rather than calling the provider again.
   ~1 hour validity). An org without storage configured simply has no
   `receipt_url` on any transaction and cannot attach new receipts, but
   everything else works.
-- Audit logs and trash listings are scoped to the calling user, not the
-  whole organisation — see the notes on those sections above.
+- Audit logs and trash listings are scoped to the organisation (the tenant
+  database connection is already the org boundary), not to the calling
+  user — every member sees every other member's actions and deletions. This
+  means `entity_id`/`details` on an audit entry must never carry a raw
+  secret: join codes are masked before being logged, for example.
