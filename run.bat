@@ -15,6 +15,14 @@ if %ERRORLEVEL% neq 0 (
     echo.
 )
 
+echo Applying control-plane database migrations...
+python backend\manage.py migrate --database=default
+if %ERRORLEVEL% neq 0 (
+    echo WARNING: control-plane migration failed. Check that the database is
+    echo reachable ^(see backend\.env^) and re-run run.bat.
+    echo.
+)
+
 echo Opening FundVault in your browser...
 timeout /t 3 /nobreak >nul
 start http://localhost:3001
