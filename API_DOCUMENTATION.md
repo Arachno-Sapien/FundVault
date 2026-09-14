@@ -1598,4 +1598,5 @@ a session reuses its previous result rather than calling the provider again.
   database connection is already the org boundary), not to the calling
   user — every member sees every other member's actions and deletions. This
   means `entity_id`/`details` on an audit entry must never carry a raw
-  secret: join codes are masked before being logged, for example.
+  secret: join codes are never written to the audit trail at all
+  (`entity_id=None`), for example.
