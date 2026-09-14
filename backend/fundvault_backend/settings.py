@@ -33,6 +33,8 @@ def _parse_database_url(url):
     """Turn postgres://user:pass@host:port/name into a Django DATABASES entry."""
     from urllib.parse import unquote, urlparse
 
+    from apps.common.utils import libpq_options
+
     parsed = urlparse(url)
     if parsed.scheme not in ("postgres", "postgresql"):
         raise ValueError(f"Unsupported database scheme: {parsed.scheme!r}. Postgres only.")
@@ -45,7 +47,7 @@ def _parse_database_url(url):
         "PORT": str(parsed.port or 5432),
         "CONN_MAX_AGE": 60,
         "CONN_HEALTH_CHECKS": True,
-        "OPTIONS": {},
+        "OPTIONS": libpq_options(parsed.query, parsed.hostname),
         # These are independent physical servers, not migration-order dependent;
         # without this, a TransactionTestCase.databases set that omits "default"
         # (e.g. a tenant-only test) hits Django's implicit dependency on

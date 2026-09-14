@@ -164,6 +164,12 @@ def check_connection(url):
     # hostaddr is omitted when the name did not resolve at all — psycopg then
     # resolves it itself and fails with its own "host not found".
     extra = {"hostaddr": ip} if ip else {}
+    # config["OPTIONS"] carries the libpq parameters parsed out of the URL's
+    # query string (sslmode above all). Without them this probe would dial in
+    # plaintext and report success while the real connection — which does
+    # apply them — requires TLS. connect_timeout stays ours: a tenant-supplied
+    # one would decide how long this HTTP request can hang.
+    params = {**config["OPTIONS"], "connect_timeout": 10, **extra}
     try:
         with psycopg.connect(
             host=config["HOST"],
@@ -171,8 +177,7 @@ def check_connection(url):
             dbname=config["NAME"],
             user=config["USER"],
             password=config["PASSWORD"],
-            connect_timeout=10,
-            **extra,
+            **params,
         ) as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT version()")
