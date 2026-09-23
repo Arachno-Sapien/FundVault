@@ -110,6 +110,14 @@ class RecurringTransaction(models.Model):
     description = models.TextField(null=True, blank=True)
     next_run = models.DateField()
     is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        db_column="created_by",
+        related_name="created_recurring",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:

@@ -8,6 +8,7 @@ from django.utils import timezone
 from apps.accounts.models import Session, User
 from apps.common.auth import create_session_token
 from apps.ledger.models import AuditLog, DatabaseFund, RecurringTransaction, TransactionFund, TrashItem
+from apps.ledger.services import process_due_recurring
 from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
@@ -159,6 +160,142 @@ class ApprovalRuleIntegrationTests(LedgerPermissionTests):
         txn_id = created["transaction"]["id"]
         response = self.client.post(f"/api/transactions/{txn_id}/approve", **self._auth("member"))
         self.assertEqual(response.status_code, 403)
+
+
+class RecurringApprovalRuleTests(LedgerPermissionTests):
+    """process_due_recurring must apply the same role-aware approval rule as
+    database_transactions, not always auto-post. A recurring rule's creator
+    can be demoted (owner-only Action.CHANGE_ROLE) after the rule was set up,
+    so this is re-checked against the creator's *current* role on every run,
+    not decided once at creation time."""
+
+    def _make_recurring(self, rec_id, creator_id, amount=600.0, fund_id="f1"):
+        with org_context(ORG_ALIAS):
+            return RecurringTransaction.objects.create(
+                id=rec_id, database_id=fund_id, type="credit", amount=amount,
+                frequency="monthly", description="rent",
+                next_run=timezone.now().date(), is_active=True,
+                created_by_id=creator_id,
+            )
+
+    def _process(self):
+        with org_context(ORG_ALIAS):
+            owner = User.objects.get(id="u_owner")
+            return process_due_recurring(owner)
+
+    def test_member_attributed_recurring_over_threshold_awaits_approval(self):
+        self._make_recurring("r_member", "u_member", amount=600.0)
+        created = self._process()
+        self.assertEqual(len(created), 1)
+        txn = created[0]
+        self.assertTrue(txn.requires_approval)
+        self.assertFalse(txn.approved)
+        with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1000.0)
+
+    def test_member_attributed_recurring_under_threshold_auto_posts(self):
+        self._make_recurring("r_member_small", "u_member", amount=50.0)
+        created = self._process()
+        txn = created[0]
+        self.assertFalse(txn.requires_approval)
+        self.assertTrue(txn.approved)
+        with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1050.0)
+
+    def test_admin_attributed_recurring_over_threshold_auto_posts(self):
+        self._make_recurring("r_admin", "u_admin", amount=600.0)
+        created = self._process()
+        txn = created[0]
+        self.assertFalse(txn.requires_approval)
+        self.assertTrue(txn.approved)
+        with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1600.0)
+
+    def _assert_pending_and_balance_unmoved(self, created):
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0].requires_approval)
+        self.assertFalse(created[0].approved)
+        with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1000.0)
+
+    # Fail closed: only a still-existing, active Admin/Owner creator skips
+    # approval. Every other creator state is gated as a Member would be.
+
+    def test_recurring_with_no_recorded_creator_awaits_approval(self):
+        self._make_recurring("r_none", None, amount=600.0)
+        self._assert_pending_and_balance_unmoved(self._process())
+
+    def test_recurring_by_admin_later_demoted_to_viewer_awaits_approval(self):
+        self._make_recurring("r_demoted", "u_admin", amount=600.0)
+        with org_context(ORG_ALIAS):
+            User.objects.filter(id="u_admin").update(role=User.Role.VIEWER)
+        self._assert_pending_and_balance_unmoved(self._process())
+
+    def test_recurring_by_deactivated_admin_awaits_approval(self):
+        self._make_recurring("r_inactive", "u_admin", amount=600.0)
+        with org_context(ORG_ALIAS):
+            User.objects.filter(id="u_admin").update(is_active=False)
+        self._assert_pending_and_balance_unmoved(self._process())
+
+    def test_recurring_by_deleted_admin_awaits_approval(self):
+        self._make_recurring("r_deleted", "u_admin", amount=600.0)
+        with org_context(ORG_ALIAS):
+            User.objects.filter(id="u_admin").delete()
+            self.assertIsNone(RecurringTransaction.objects.get(id="r_deleted").created_by_id)
+        self._assert_pending_and_balance_unmoved(self._process())
+
+    def test_untrusted_creator_under_threshold_still_auto_posts(self):
+        # Treated as a Member, so needs_approval's own threshold still applies.
+        self._make_recurring("r_none_small", None, amount=50.0)
+        created = self._process()
+        self.assertFalse(created[0].requires_approval)
+        with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1050.0)
+
+    def test_untrusted_creator_with_no_threshold_auto_posts(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.filter(id="f1").update(approval_threshold=0)
+        self._make_recurring("r_none_nothreshold", None, amount=600.0)
+        created = self._process()
+        self.assertFalse(created[0].requires_approval)
+
+    def test_pending_recurring_debit_moves_balance_only_once_approved(self):
+        with org_context(ORG_ALIAS):
+            # Approval rebuilds the balance from approved rows, so the
+            # fixture's 1000.0 needs a row behind it.
+            TransactionFund.objects.create(
+                id="t_opening", database_id="f1", type="credit", amount=1000.0,
+                date=timezone.now() - timedelta(days=1), mode="cash", running_balance=1000.0,
+            )
+            rec = self._make_recurring("r_debit", "u_member", amount=600.0)
+            RecurringTransaction.objects.filter(id=rec.id).update(type="debit")
+        created = self._process()
+        self._assert_pending_and_balance_unmoved(created)
+
+        response = self.client.post(
+            f"/api/transactions/{created[0].id}/approve", **self._auth("admin")
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["newBalance"], 400.0)
+        with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 400.0)
+            self.assertTrue(TransactionFund.objects.get(id=created[0].id).approved)
+
+    def test_pending_recurring_debit_cannot_be_approved_past_the_balance(self):
+        with org_context(ORG_ALIAS):
+            rec = self._make_recurring("r_debit_big", "u_member", amount=600.0)
+            RecurringTransaction.objects.filter(id=rec.id).update(type="debit")
+        created = self._process()
+        # The balance drops below the debit between posting and approval.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.filter(id="f1").update(balance=100.0)
+        response = self.client.post(
+            f"/api/transactions/{created[0].id}/approve", **self._auth("admin")
+        )
+        self.assertEqual(response.status_code, 400)
+        with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 100.0)
+            self.assertFalse(TransactionFund.objects.get(id=created[0].id).approved)
 
 
 class ExhaustiveMutatingEndpointTests(TestCase):

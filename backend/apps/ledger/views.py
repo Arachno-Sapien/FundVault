@@ -678,6 +678,7 @@ def recurring_list_create(request, database_id):
         description=description,
         next_run=next_run_date,
         is_active=True,
+        created_by_id=request.fv_user.id,
     )
     add_audit(request.fv_user.id, "create", "recurring", item.id, f"Recurring {tx_type} of ₹{amount} ({frequency}) created")
     return JsonResponse(serialize_recurring(item))

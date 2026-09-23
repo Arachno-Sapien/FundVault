@@ -108,5 +108,6 @@ def serialize_recurring(item):
         "description": item.description or "",
         "next_run": item.next_run.isoformat() if item.next_run else None,
         "is_active": bool(item.is_active),
+        "created_by": item.created_by_id,
         "created_at": item.created_at.isoformat() if item.created_at else None,
     }
