@@ -67,3 +67,48 @@ class ProductionSettingsTests(SimpleTestCase):
         with mock.patch.dict(os.environ, env, clear=False):
             settings = _load()
             self.assertEqual(settings.FUNDVAULT_TENANT_HOST_ALLOWLIST, frozenset())
+
+    def test_render_hostname_is_allowed_without_manual_hosts(self):
+        env = dict(REQUIRED, RENDER_EXTERNAL_HOSTNAME="fundvault-api-x1.onrender.com")
+        env.pop("DJANGO_ALLOWED_HOSTS")
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(_load().ALLOWED_HOSTS, ["fundvault-api-x1.onrender.com"])
+
+    def test_render_hostname_is_added_to_manual_hosts(self):
+        env = dict(REQUIRED, RENDER_EXTERNAL_HOSTNAME="fundvault-api-x1.onrender.com")
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                _load().ALLOWED_HOSTS,
+                ["fundvault.example.com", "fundvault-api-x1.onrender.com"],
+            )
+
+    def test_hosts_are_required_off_render(self):
+        env = dict(REQUIRED)
+        env.pop("DJANGO_ALLOWED_HOSTS")
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ImproperlyConfigured):
+                _load()
+
+    def test_wildcard_hosts_are_refused_on_render_too(self):
+        env = dict(REQUIRED, DJANGO_ALLOWED_HOSTS="*", RENDER_EXTERNAL_HOSTNAME="a.onrender.com")
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ImproperlyConfigured):
+                _load()
+
+    def test_cors_origins_lose_trailing_slash_and_whitespace(self):
+        env = dict(REQUIRED, CORS_ALLOWED_ORIGINS=" https://a.vercel.app/ , https://b.example.com")
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                _load().CORS_ALLOWED_ORIGINS, ["https://a.vercel.app", "https://b.example.com"]
+            )
+
+    def test_malformed_fernet_key_is_refused(self):
+        env = dict(REQUIRED, FUNDVAULT_SECRET_KEY="not-a-fernet-key")
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesMessage(ImproperlyConfigured, "not a valid Fernet key"):
+                _load()
+
+    def test_x_frame_options_header_is_actually_sent(self):
+        with mock.patch.dict(os.environ, REQUIRED, clear=True):
+            settings = _load()
+            self.assertIn("django.middleware.clickjacking.XFrameOptionsMiddleware", settings.MIDDLEWARE)

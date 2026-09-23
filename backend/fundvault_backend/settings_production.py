@@ -6,6 +6,7 @@ would issue forgeable tokens for every organisation.
 
 import os
 
+from cryptography.fernet import Fernet
 from django.core.exceptions import ImproperlyConfigured
 
 from fundvault_backend.settings import *  # noqa: F401,F403
@@ -31,14 +32,32 @@ DEBUG = False
 SECRET_KEY = _required("DJANGO_SECRET_KEY")
 FUNDVAULT_JWT_SECRET = _required("JWT_SECRET")
 FUNDVAULT_SECRET_KEY = _required("FUNDVAULT_SECRET_KEY")
+# Checked here rather than left to apps/orgs/fields.py: a bad key would
+# otherwise boot, pass the health check, and 500 on the first org creation.
+try:
+    Fernet(FUNDVAULT_SECRET_KEY.encode())
+except (ValueError, TypeError):
+    raise ImproperlyConfigured(
+        "FUNDVAULT_SECRET_KEY is not a valid Fernet key. Generate one with: "
+        'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
+    ) from None
 
-ALLOWED_HOSTS = [h.strip() for h in _required("DJANGO_ALLOWED_HOSTS").split(",") if h.strip()]
+# Render injects the service's own onrender.com hostname, which is also the
+# Host its health check sends. DJANGO_ALLOWED_HOSTS adds custom domains, and
+# is required only where nothing supplies a hostname.
+_render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+_hosts = os.getenv("DJANGO_ALLOWED_HOSTS", "") if _render_host else _required("DJANGO_ALLOWED_HOSTS")
+ALLOWED_HOSTS = [h.strip() for h in _hosts.split(",") if h.strip()]
+if _render_host:
+    ALLOWED_HOSTS.append(_render_host)
 if "*" in ALLOWED_HOSTS:
     raise ImproperlyConfigured("DJANGO_ALLOWED_HOSTS must name real hosts in production, not '*'.")
 
 CORS_ALLOW_ALL_ORIGINS = False
+# corsheaders rejects an origin with a trailing slash (system check E014),
+# which would fail the build's migrate step.
 CORS_ALLOWED_ORIGINS = [
-    o.strip() for o in _required("CORS_ALLOWED_ORIGINS").split(",") if o.strip()
+    o.strip().rstrip("/") for o in _required("CORS_ALLOWED_ORIGINS").split(",") if o.strip()
 ]
 CORS_ALLOW_CREDENTIALS = False
 
@@ -70,6 +89,7 @@ MIDDLEWARE = [
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "apps.orgs.middleware.OrgContextMiddleware",
 ]
 
