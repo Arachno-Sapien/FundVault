@@ -81,7 +81,9 @@ class ConnectionRegistryTests(TestCase):
         alias = tenant_connections.ensure_connection(self.org)
         self.assertEqual(alias, "org_abc123")
         self.assertIn(alias, connections.databases)
-        self.assertEqual(connections.databases[alias]["NAME"], "fundvault_tenant_dev")
+        # The same physical database tenant_dev names (under the test runner,
+        # its test copy).
+        self.assertEqual(connections.databases[alias]["NAME"], connections["tenant_dev"].settings_dict["NAME"])
         self.assertEqual(connections.databases[alias]["PORT"], "5434")
 
     def test_ensure_connection_is_idempotent(self):

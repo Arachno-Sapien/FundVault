@@ -3,6 +3,10 @@
 from fundvault_backend.settings import *  # noqa: F401,F403
 from fundvault_backend.settings import _parse_database_url
 
+# Private test database names (FUNDVAULT_TEST_DB_SUFFIX), no rebuilt tenant
+# config reaching a real database, and a hard stop if anything tries.
+TEST_RUNNER = "fundvault_backend.test_runner.IsolatedDatabaseRunner"
+
 # Fast, deterministic password hashing is irrelevant here (bcrypt is called
 # directly, not through Django auth), but keep tests quiet and repeatable.
 FUNDVAULT_JWT_SECRET = "test-jwt-secret"

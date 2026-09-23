@@ -18,7 +18,10 @@ from django.db import IntegrityError, connections, transaction
 from django.utils.text import slugify
 
 from apps.common.utils import uid
-from apps.orgs.connections import alias_for_org, build_config, drop_connection
+# build_config is called through its module, not a from-import copy, so the
+# test runner (fundvault_backend/test_runner.py) can redirect it.
+from apps.orgs import connections as tenant_connections
+from apps.orgs.connections import alias_for_org, drop_connection
 from apps.orgs.models import Org
 
 _BLOCKED_TARGET_MESSAGE = "That host cannot be used."
@@ -146,7 +149,7 @@ def check_connection(url):
     alias to leak or clean up.
     """
     try:
-        config = build_config(url)
+        config = tenant_connections.build_config(url)
     except ValueError as exc:
         # InvalidConnectionString is a ValueError; catching the parent too
         # covers urlparse's own ValueError (e.g. a non-numeric port) so a
@@ -204,7 +207,7 @@ def provision_org(name, url, owner_email):
 
     org_id = uid()
     alias = alias_for_org(org_id)
-    connections.databases[alias] = build_config(url)
+    connections.databases[alias] = tenant_connections.build_config(url)
     try:
         call_command("migrate", database=alias, verbosity=0)
     except Exception as exc:

@@ -9,7 +9,10 @@ from django.db import connections
 from django.utils.text import slugify
 
 from apps.common.utils import uid
-from apps.orgs.connections import InvalidConnectionString, build_config, drop_connection
+# build_config is called through its module, not a from-import copy, so the
+# test runner (fundvault_backend/test_runner.py) can redirect it.
+from apps.orgs import connections as tenant_connections
+from apps.orgs.connections import InvalidConnectionString, drop_connection
 from apps.orgs.models import Org
 
 
@@ -27,7 +30,7 @@ class Command(BaseCommand):
         alias = f"org_{org_id}"
 
         try:
-            config = build_config(options["url"])
+            config = tenant_connections.build_config(options["url"])
         except InvalidConnectionString as exc:
             raise CommandError(str(exc))
 
