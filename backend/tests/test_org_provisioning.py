@@ -7,7 +7,13 @@ from django.test import Client, TestCase
 from apps.orgs import connections as tenant_connections
 from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.models import EmailIndex, Org
-from apps.orgs.provisioning import ProvisioningError, check_connection, provision_org
+from apps.orgs.provisioning import (
+    ProvisioningError,
+    _friendly,
+    check_connection,
+    provision_org,
+    resolve_target,
+)
 
 TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
 DEAD_URL = "postgres://fundvault:devpassword@127.0.0.1:9/nothing"
@@ -378,3 +384,39 @@ class PublicEndpointRateLimitTests(TestCase):
         self.assertEqual(
             self._post("/api/orgs/validate-connection", {"databaseUrl": ""}).status_code, 400
         )
+
+
+def _addrinfo(*ips):
+    return [(None, None, None, "", (ip, 5432)) for ip in ips]
+
+
+class IPv6OnlyHostTests(TestCase):
+    """The deploy host has no IPv6 egress, and Supabase's direct hosts are
+    IPv6-only: say so instead of failing with a generic connection error."""
+
+    databases = {"default"}
+
+    @mock.patch("apps.orgs.provisioning.socket.getaddrinfo", return_value=_addrinfo("2600:1f18::1"))
+    def test_ipv6_only_host_gets_a_pooler_hint(self, _gai):
+        result = check_connection("postgres://u:p@db.abc.supabase.co:5432/postgres")
+        self.assertFalse(result.ok)
+        self.assertIn("IPv6", result.message)
+        self.assertIn("Session pooler", result.message)
+
+    @mock.patch("apps.orgs.provisioning.socket.getaddrinfo",
+                return_value=_addrinfo("2600:1f18::1", "54.1.2.3"))
+    def test_dual_stack_host_is_pinned_to_its_ipv4_address(self, _gai):
+        self.assertEqual(resolve_target("db.example.com", 5432), ("54.1.2.3", None))
+
+    @mock.patch("apps.orgs.provisioning.socket.getaddrinfo", return_value=_addrinfo("::1"))
+    def test_internal_ipv6_is_still_blocked_not_hinted(self, _gai):
+        self.assertEqual(resolve_target("evil.example.com", 5432), (None, "That host cannot be used."))
+
+    @mock.patch("apps.orgs.provisioning.socket.getaddrinfo",
+                return_value=_addrinfo("54.1.2.3", "fd00::1"))
+    def test_any_internal_address_still_blocks_a_dual_stack_host(self, _gai):
+        self.assertEqual(resolve_target("evil.example.com", 5432), (None, "That host cannot be used."))
+
+    def test_network_unreachable_is_explained(self):
+        message = _friendly(Exception('connection to server at "x" failed: Network is unreachable'))
+        self.assertIn("IPv4 connection pooler", message)

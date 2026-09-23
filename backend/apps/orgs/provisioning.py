@@ -25,6 +25,10 @@ from apps.orgs.connections import alias_for_org, drop_connection
 from apps.orgs.models import Org
 
 _BLOCKED_TARGET_MESSAGE = "That host cannot be used."
+_IPV6_ONLY_MESSAGE = (
+    "That host has only an IPv6 address, which this server cannot reach. For a database, "
+    "use your provider's IPv4 connection pooler instead (on Supabase: the Session pooler string)."
+)
 
 
 def _is_internal_address(ip_str):
@@ -74,10 +78,15 @@ def resolve_target(host, port):
         return None, None
     if not allowlisted and any(_is_internal_address(addr) for addr in addrs):
         return None, _BLOCKED_TARGET_MESSAGE
-    # Pinning to the first answer gives up DNS-level failover across a
+    # The deployment host (Render) has no IPv6 egress, and Supabase's direct
+    # db.<ref>.supabase.co hosts resolve to IPv6 only.
+    ipv4 = [addr for addr in addrs if ipaddress.ip_address(addr).version == 4]
+    if not ipv4:
+        return None, _IPV6_ONLY_MESSAGE
+    # Pinning to the first IPv4 answer gives up DNS-level failover across a
     # multi-address record; that is the price of checking and dialling the
     # same address.
-    return addrs[0], None
+    return ipv4[0], None
 
 
 def blocked_https_url_message(url):
@@ -126,6 +135,11 @@ def _friendly(exc):
         return "Authentication failed — check the username and password."
     if "could not translate host name" in lowered or "name or service not known" in lowered:
         return "Host not found — check the hostname in the connection string."
+    if "network is unreachable" in lowered:
+        return (
+            "Network unreachable — if the host is IPv6-only, use your provider's IPv4 "
+            "connection pooler instead (on Supabase: the Session pooler string)."
+        )
     if "connection refused" in lowered:
         return "Connection refused — check the host and port, and that the server allows external connections."
     if "does not exist" in lowered and "database" in lowered:
