@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime
 
 from django.db import transaction
@@ -27,6 +28,8 @@ from apps.ledger.serializers import (
 )
 from apps.ledger.services import process_due_recurring, recalculate_running_balances
 from apps.orgs.context import current_org_alias
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_iso_datetime(raw):
@@ -62,6 +65,39 @@ def _storage_for(request):
         return parse_storage_config(request.fv_org.storage_config)
     except StorageNotConfigured:
         return None
+
+
+def _delete_receipts_on_commit(request, keys):
+    """Remove receipt objects from the org's bucket once no row points at them.
+
+    Runs after the surrounding DB change commits, so a rollback never loses an
+    image that is still referenced. databases_merge copies rows with their
+    receipt_key, so one object can back several rows: only keys nothing still
+    references are deleted. Best-effort -- storage being down or unconfigured
+    must never fail the request, so failures are only logged.
+    """
+    keys = {key for key in keys if key}
+    storage = _storage_for(request) if keys else None
+    if storage is None:
+        return
+    alias = current_org_alias()
+
+    def cleanup():
+        from apps.ledger.storage import _redact, delete_object
+
+        still_used = set(
+            TransactionFund.objects.using(alias)
+            .filter(receipt_key__in=keys)
+            .values_list("receipt_key", flat=True)
+        )
+        for key in keys - still_used:
+            try:
+                delete_object(storage, key)
+            except Exception as exc:
+                logger.warning("Could not delete receipt %s: %s", key, _redact(str(exc), storage))
+
+    # robust: a failure in the reference check is logged, not raised.
+    transaction.on_commit(cleanup, using=alias, robust=True)
 
 
 @csrf_exempt
@@ -401,6 +437,7 @@ def transaction_delete_voided(request, transaction_id):
     with transaction.atomic(using=current_org_alias()):
         txn.delete()
         recalculate_running_balances(db_id)
+        _delete_receipts_on_commit(request, [txn.receipt_key])
 
     add_audit(request.fv_user.id, "delete", "transaction", transaction_id, f"Voided transaction deleted: {txn_desc}")
     return JsonResponse({"success": True})
@@ -574,20 +611,23 @@ def trash_list(request):
             return denied
         items = list(TrashItem.objects.all())
         for item in items:
-            _delete_trash_item_permanently(item, request.fv_user)
+            _delete_trash_item_permanently(request, item)
         return JsonResponse({"success": True})
 
     return json_error("Method not allowed", 405)
 
 
-def _delete_trash_item_permanently(item, user):
-    if item.entity_type == "database":
-        data = json.loads(item.entity_data)
-        db_id = data.get("id")
-        RecurringTransaction.objects.filter(database_id=db_id).delete()
-        TransactionFund.objects.filter(database_id=db_id).delete()
-        DatabaseFund.objects.filter(id=db_id).delete()
-    item.delete()
+def _delete_trash_item_permanently(request, item):
+    with transaction.atomic(using=current_org_alias()):
+        if item.entity_type == "database":
+            data = json.loads(item.entity_data)
+            db_id = data.get("id")
+            txns = TransactionFund.objects.filter(database_id=db_id)
+            _delete_receipts_on_commit(request, txns.values_list("receipt_key", flat=True))
+            RecurringTransaction.objects.filter(database_id=db_id).delete()
+            txns.delete()
+            DatabaseFund.objects.filter(id=db_id).delete()
+        item.delete()
 
 
 @csrf_exempt
@@ -627,7 +667,7 @@ def trash_delete(request, item_id):
     item = TrashItem.objects.filter(id=item_id).first()
     if not item:
         return json_error("Item not found", 404)
-    _delete_trash_item_permanently(item, request.fv_user)
+    _delete_trash_item_permanently(request, item)
     return JsonResponse({"success": True})
 
 
@@ -800,8 +840,13 @@ def transaction_receipt(request, transaction_id):
     except Exception as exc:
         return json_error(f"Could not upload the receipt: {_redact(str(exc), storage)}", 502)
 
+    old_key = txn.receipt_key
     txn.receipt_key = key
     txn.save(update_fields=["receipt_key"])
+    # Keys are deterministic per fund+transaction, so this only differs for a
+    # row copied by databases_merge; the same key was just overwritten in place.
+    if old_key != key:
+        _delete_receipts_on_commit(request, [old_key])
     add_audit(request.fv_user.id, "update", "transaction", txn.id, "Receipt attached")
 
     from apps.ledger.storage import signed_url

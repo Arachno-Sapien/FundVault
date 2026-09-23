@@ -9,7 +9,7 @@ from PIL import Image
 
 from apps.accounts.models import Session, User
 from apps.common.auth import create_session_token
-from apps.ledger.models import DatabaseFund, TransactionFund
+from apps.ledger.models import DatabaseFund, TransactionFund, TrashItem
 from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
@@ -226,3 +226,122 @@ class ReceiptUploadTests(TestCase):
         storage = parse_storage_config(STORAGE_CONFIG)
         result = serialize_transaction(txn, storage)
         self.assertIsNone(result["receipt_url"])
+
+    # Receipt cleanup: an object nothing references any more is removed from
+    # the bucket after the DB change commits, best-effort.
+
+    def _with_storage(self, mock_client_factory):
+        fake_client = mock.Mock()
+        fake_client.generate_presigned_url.return_value = "https://signed.example.com/x"
+        mock_client_factory.return_value = fake_client
+        self.org.storage_config = STORAGE_CONFIG
+        self.org.save(update_fields=["storage_config"])
+        return fake_client
+
+    def _void_with_receipt(self, key="receipts/f1/t1.jpg"):
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.filter(id="t1").update(is_voided=True, receipt_key=key)
+
+    def _delete_voided(self):
+        with self.captureOnCommitCallbacks(using=ORG_ALIAS, execute=True):
+            return self.client.delete(
+                "/api/transactions/t1/delete", HTTP_AUTHORIZATION=f"Bearer {self.token}"
+            )
+
+    def _trash_fund(self):
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.filter(id="t1").update(receipt_key="receipts/f1/t1.jpg")
+            DatabaseFund.objects.filter(id="f1").update(is_deleted=True)
+            TrashItem.objects.create(
+                id="tr1", entity_type="database", entity_data=json.dumps({"id": "f1"}),
+                deleted_by_id="u1",
+            )
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_deleting_a_voided_transaction_deletes_its_receipt(self, mock_client_factory):
+        fake_client = self._with_storage(mock_client_factory)
+        self._void_with_receipt()
+        response = self._delete_voided()
+        self.assertEqual(response.status_code, 200)
+        fake_client.delete_object.assert_called_once_with(Bucket="receipts", Key="receipts/f1/t1.jpg")
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_deleting_a_trashed_fund_deletes_its_transactions_receipts(self, mock_client_factory):
+        fake_client = self._with_storage(mock_client_factory)
+        self._trash_fund()
+        with self.captureOnCommitCallbacks(using=ORG_ALIAS, execute=True):
+            response = self.client.delete("/api/trash/tr1", HTTP_AUTHORIZATION=f"Bearer {self.token}")
+        self.assertEqual(response.status_code, 200)
+        fake_client.delete_object.assert_called_once_with(Bucket="receipts", Key="receipts/f1/t1.jpg")
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_emptying_the_trash_deletes_receipts(self, mock_client_factory):
+        fake_client = self._with_storage(mock_client_factory)
+        self._trash_fund()
+        with self.captureOnCommitCallbacks(using=ORG_ALIAS, execute=True):
+            response = self.client.delete("/api/trash", HTTP_AUTHORIZATION=f"Bearer {self.token}")
+        self.assertEqual(response.status_code, 200)
+        fake_client.delete_object.assert_called_once_with(Bucket="receipts", Key="receipts/f1/t1.jpg")
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_replacing_a_receipt_under_a_different_key_deletes_the_old_one(self, mock_client_factory):
+        # A row copied by databases_merge keeps its source fund's key.
+        fake_client = self._with_storage(mock_client_factory)
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.filter(id="t1").update(receipt_key="receipts/f0/t0.jpg")
+        with self.captureOnCommitCallbacks(using=ORG_ALIAS, execute=True):
+            response = self._upload(_png())
+        self.assertEqual(response.status_code, 200)
+        fake_client.delete_object.assert_called_once_with(Bucket="receipts", Key="receipts/f0/t0.jpg")
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_replacing_a_receipt_under_the_same_key_deletes_nothing(self, mock_client_factory):
+        fake_client = self._with_storage(mock_client_factory)
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.filter(id="t1").update(receipt_key="receipts/f1/t1.jpg")
+        with self.captureOnCommitCallbacks(using=ORG_ALIAS, execute=True):
+            response = self._upload(_png())
+        self.assertEqual(response.status_code, 200)
+        fake_client.delete_object.assert_not_called()
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_receipt_still_referenced_by_a_merged_copy_is_kept(self, mock_client_factory):
+        fake_client = self._with_storage(mock_client_factory)
+        self._void_with_receipt()
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="f2", name="Merged", created_by_id="u1")
+            TransactionFund.objects.create(
+                id="t1copy", database_id="f2", type="credit", amount=10.0, date=timezone.now(),
+                mode="cash", running_balance=10.0, receipt_key="receipts/f1/t1.jpg",
+            )
+        self.assertEqual(self._delete_voided().status_code, 200)
+        fake_client.delete_object.assert_not_called()
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_no_receipt_key_means_no_storage_call(self, mock_client_factory):
+        fake_client = self._with_storage(mock_client_factory)
+        self._void_with_receipt(key=None)
+        self.assertEqual(self._delete_voided().status_code, 200)
+        fake_client.delete_object.assert_not_called()
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_no_storage_config_means_no_storage_call(self, mock_client_factory):
+        self._void_with_receipt()  # storage_config left blank by setUp
+        self.assertEqual(self._delete_voided().status_code, 200)
+        mock_client_factory.assert_not_called()
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_storage_failure_does_not_fail_the_delete_and_logs_redacted(self, mock_client_factory):
+        fake_client = self._with_storage(mock_client_factory)
+        fake_client.delete_object.side_effect = RuntimeError(
+            "denied for key=super-secret-value auth=AKIATESTKEY"
+        )
+        self._void_with_receipt()
+        with self.assertLogs("apps.ledger.views", level="WARNING") as logs:
+            response = self._delete_voided()
+        self.assertEqual(response.status_code, 200)
+        with org_context(ORG_ALIAS):
+            self.assertFalse(TransactionFund.objects.filter(id="t1").exists())
+        logged = "\n".join(logs.output)
+        self.assertNotIn("super-secret-value", logged)
+        self.assertNotIn("AKIATESTKEY", logged)
