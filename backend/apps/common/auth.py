@@ -6,7 +6,7 @@ import jwt
 from django.conf import settings
 from django.utils import timezone
 
-from apps.accounts.models import Session, User
+from apps.accounts.models import Session
 from apps.common.utils import json_error
 from apps.common.utils import uid
 
@@ -81,18 +81,6 @@ def auth_required(view_func):
 
         request.fv_user = user
         request.fv_token = token
-        return view_func(request, *args, **kwargs)
-
-    return wrapped
-
-
-def admin_required(view_func):
-    @auth_required
-    @wraps(view_func)
-    def wrapped(request, *args, **kwargs):
-        user = getattr(request, "fv_user", None)
-        if not user or user.role != User.Role.ADMIN:
-            return json_error("Admin access required", 403)
         return view_func(request, *args, **kwargs)
 
     return wrapped
