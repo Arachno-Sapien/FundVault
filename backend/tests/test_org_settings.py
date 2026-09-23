@@ -197,3 +197,14 @@ class OutboundTargetTests(TestCase):
         error = response.json()["error"]
         for leak in ("169.254", "127.0.0.1", "9999", "refused", "timed out", "connect"):
             self.assertNotIn(leak, error.lower(), error)
+
+    def test_non_object_configs_are_a_clean_400(self):
+        # The UI has no "clear" action and clearing storage would strand
+        # every stored receipt, so null is refused like any invalid config.
+        for section in ("storage", "ai"):
+            for value in (None, [], "x", 1):
+                with self.subTest(section=section, value=value):
+                    response = self._put({section: value})
+                    self.assertEqual(response.status_code, 400, response.content)
+        org = Org.objects.get(id="o1")
+        self.assertEqual((org.storage_config, org.ai_config), ("", ""))

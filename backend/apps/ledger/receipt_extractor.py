@@ -71,6 +71,8 @@ def parse_ai_config(raw):
         data = json.loads(raw)
     except (ValueError, TypeError):
         return {"primary": None, "fallback": None}
+    if not isinstance(data, dict):  # e.g. a PUT of {"ai": null}
+        return {"primary": None, "fallback": None}
     return {"primary": _one(data.get("primary")), "fallback": _one(data.get("fallback"))}
 
 

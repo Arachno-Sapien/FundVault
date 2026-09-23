@@ -38,6 +38,8 @@ def parse_storage_config(raw):
         data = json.loads(raw)
     except (ValueError, TypeError):
         return None
+    if not isinstance(data, dict):  # e.g. a PUT of {"storage": null}
+        data = {}
     missing = [key for key in REQUIRED if not data.get(key)]
     if missing:
         raise StorageNotConfigured(f"Storage config is missing: {', '.join(missing)}")
