@@ -4,17 +4,19 @@ services:
     runtime: python
     plan: free
     buildCommand: "./backend/build.sh"
-    startCommand: "gunicorn fundvault_backend.wsgi:application --chdir backend --bind 0.0.0.0:$PORT --workers 2 --timeout 60"
+    startCommand: "gunicorn fundvault_backend.wsgi:application --chdir backend --bind 0.0.0.0:$PORT --workers 2 --timeout 60 --max-requests 500 --max-requests-jitter 50"
     healthCheckPath: /api/health
     envVars:
       - key: DJANGO_SETTINGS_MODULE
         value: fundvault_backend.settings_production
       - key: PYTHON_VERSION
         value: "3.13.1"
+      # The control plane holds every org's encrypted connection string, so it
+      # must not expire: Render deletes free Postgres 30 days after creation.
+      # Paste a non-expiring Postgres URL (a Neon project, or a paid Render
+      # Postgres's internal URL).
       - key: DATABASE_URL
-        fromDatabase:
-          name: fundvault-control
-          property: connectionString
+        sync: false
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: JWT_SECRET
@@ -23,12 +25,7 @@ services:
       #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       - key: FUNDVAULT_SECRET_KEY
         sync: false
-      - key: DJANGO_ALLOWED_HOSTS
-        sync: false
+      # The service's onrender.com host is allowed automatically; add
+      # DJANGO_ALLOWED_HOSTS in the dashboard only for a custom domain.
       - key: CORS_ALLOWED_ORIGINS
         sync: false
-
-databases:
-  - name: fundvault-control
-    plan: free
-    postgresMajorVersion: "16"
