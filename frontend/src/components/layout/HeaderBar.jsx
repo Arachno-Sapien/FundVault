@@ -14,6 +14,7 @@ export default function HeaderBar({
   setUserDropdownOpen
 }) {
   const avatar = (currentUser?.username || "G")[0]?.toUpperCase();
+  const role = currentUser?.role || "";
   const canManageUsers = can(currentUser, ACTIONS.MANAGE_MEMBERS);
   const canManageOrgConfig = can(currentUser, ACTIONS.MANAGE_ORG_CONFIG);
 
@@ -42,7 +43,7 @@ export default function HeaderBar({
             </div>
             <div className="user-meta">
               <div className="user-name">{currentUser?.username || "Guest"}</div>
-              <div className="user-role">{currentUser?.role === "admin" ? "Admin" : "Member"}</div>
+              <div className="user-role">{role.charAt(0).toUpperCase() + role.slice(1)}</div>
             </div>
           </div>
 

@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 import { fmt, formatDate, formatDateShort, nowInput } from "lib/format";
+import { ACTIONS, can } from "lib/permissions";
 import { extractReceipt } from "lib/api";
 import Modal from "components/modals/Modal";
 import OrgSettingsModal from "components/modals/OrgSettingsModal";
@@ -814,7 +815,8 @@ export default function AppModals({
           <div key={user.id} className="trash-item" style={{ padding: 12, marginBottom: 8, display: "flex", justifyContent: "space-between", gap: 12 }}>
             <div>
               <div>
-                👤 {user.username} {user.role === "admin" ? <span className="txn-type credit">ADMIN</span> : <span className="txn-type debit">MEMBER</span>}
+                👤 {user.username}{" "}
+                <span className={`txn-type ${user.role === "owner" || user.role === "admin" ? "credit" : "debit"}`}>{user.role.toUpperCase()}</span>
               </div>
               <div style={{ color: "var(--muted)", fontSize: ".82rem" }}>
                 {user.email} • {user.is_active ? "Active" : "Inactive"} • Joined {formatDate(user.created_at)}
@@ -827,9 +829,19 @@ export default function AppModals({
               <button className="btn btn-outline btn-sm" onClick={() => actions.editManagedUser(user)}>
                 ✏️ Edit
               </button>
-              <button className="btn btn-outline btn-sm" onClick={() => actions.toggleManagedUserRole(user)}>
-                {user.role === "admin" ? "Set Member" : "Set Admin"}
-              </button>
+              {/* Only the Owner changes roles, and the Owner's own role moves only by transfer. */}
+              {can(state.currentUser, ACTIONS.CHANGE_ROLE) && user.role !== "owner" && (
+                <select
+                  className="btn btn-outline btn-sm"
+                  aria-label={`Role for ${user.username}`}
+                  value={user.role}
+                  onChange={e => actions.setManagedUserRole(user, e.target.value)}
+                >
+                  <option value="admin">Admin</option>
+                  <option value="member">Member</option>
+                  <option value="viewer">Viewer</option>
+                </select>
+              )}
               <button className="btn btn-outline btn-sm" onClick={() => actions.toggleManagedUserStatus(user)}>
                 {user.is_active ? "Deactivate" : "Activate"}
               </button>

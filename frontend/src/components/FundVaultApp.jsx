@@ -700,18 +700,13 @@ export default function FundVaultApp() {
     }
   };
 
-  const toggleManagedUserRole = async user => {
-    const nextRole = user.role === "admin" ? "member" : "admin";
+  const setManagedUserRole = async (user, nextRole) => {
     if (!window.confirm(`Change role of ${user.username} to ${nextRole}?`)) return;
     try {
-      const updated = await authedRequest(`/admin/users/${user.id}`, {
+      await authedRequest(`/admin/users/${user.id}`, {
         method: "PUT",
         body: JSON.stringify({ role: nextRole })
       });
-      if (currentUser?.id === user.id) {
-        const next = { ...currentUser, role: updated.role };
-        setCurrentUser(next);
-      }
       toast("Role updated", "success");
       await refreshManagedUsers();
     } catch (err) {
@@ -1094,7 +1089,7 @@ export default function FundVaultApp() {
           deleteRecurring,
           refreshManagedUsers,
           editManagedUser,
-          toggleManagedUserRole,
+          setManagedUserRole,
           toggleManagedUserStatus,
           resetManagedUserPassword,
           deleteManagedUser,
