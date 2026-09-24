@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { fmt, formatDate } from "lib/format";
 
@@ -62,10 +62,11 @@ export default function DatabaseView({
     return true;
   });
 
-  const sorted = useMemo(() => {
-    if (!sortColumn) return filtered;
-    const list = [...filtered];
-    list.sort((a, b) => {
+  // Plain code, not useMemo: a hook after the early return above breaks the
+  // rules of hooks, and `filtered` is rebuilt every render anyway.
+  const sorted = !sortColumn
+    ? filtered
+    : [...filtered].sort((a, b) => {
       let left;
       let right;
       if (sortColumn === "date") {
@@ -85,8 +86,6 @@ export default function DatabaseView({
       if (left > right) return sortDirection === "asc" ? 1 : -1;
       return 0;
     });
-    return list;
-  }, [filtered, sortColumn, sortDirection]);
 
   const sortIcon = column => {
     if (sortColumn !== column) return "↕";
