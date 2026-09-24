@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { Modal } from "components/modals/AppModals";
+import Modal from "components/modals/Modal";
 
 const BLANK_STORAGE = { endpoint_url: "", bucket: "", region: "auto", access_key: "", secret_key: "" };
 const BLANK_AI = { provider: "openai_compatible", base_url: "", model: "", api_key: "" };

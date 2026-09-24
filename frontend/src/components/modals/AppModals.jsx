@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 
 import { fmt, formatDate, formatDateShort, nowInput } from "lib/format";
 import { extractReceipt } from "lib/api";
+import Modal from "components/modals/Modal";
 import OrgSettingsModal from "components/modals/OrgSettingsModal";
 
 // Extraction costs the organisation money, so an identical image submitted
@@ -14,22 +15,6 @@ async function hashFile(file) {
   return Array.from(new Uint8Array(digest))
     .map(byte => byte.toString(16).padStart(2, "0"))
     .join("");
-}
-
-export function Modal({ open, id, title, children, onClose, large = false }) {
-  return (
-    <div className={`overlay ${open ? "open" : ""}`} id={id} onClick={e => e.target.id === id && onClose()}>
-      <div className={`modal ${large ? "modal-lg" : ""}`}>
-        <div className="modal-head">
-          <span className="modal-title">{title}</span>
-          <button className="close-btn" onClick={onClose}>
-            ✕
-          </button>
-        </div>
-        <div className="modal-body">{children}</div>
-      </div>
-    </div>
-  );
 }
 
 export default function AppModals({
