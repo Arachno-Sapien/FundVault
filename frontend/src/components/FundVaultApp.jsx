@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
 
 import OrgGateway from "components/auth/OrgGateway";
@@ -7,13 +8,15 @@ import HeaderBar from "components/layout/HeaderBar";
 import NavTabs from "components/layout/NavTabs";
 import AppModals from "components/modals/AppModals";
 import AuditView from "components/views/AuditView";
-import DashboardView from "components/views/DashboardView";
 import DatabaseView from "components/views/DatabaseView";
 import HomeView from "components/views/HomeView";
 import TrashView from "components/views/TrashView";
 import { apiRequest, uploadReceipt } from "lib/api";
 import { fmt, formatDate, nowInput } from "lib/format";
 import { ACTIONS, can } from "lib/permissions";
+
+// chart.js is only needed on the Dashboard tab, so it stays out of the first load.
+const DashboardView = dynamic(() => import("components/views/DashboardView"), { ssr: false });
 
 const defaultTxnFilters = {
   search: "",

@@ -1,6 +1,4 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
 
 import { fmt, formatDate, formatDateShort, nowInput } from "lib/format";
 import { extractReceipt } from "lib/api";
@@ -209,7 +207,7 @@ export default function AppModals({
     actions.toast("CSV exported", "success");
   };
 
-  const exportPDF = () => {
+  const exportPDF = async () => {
     if (!state.currentDb) return;
     const txns = (state.transactions || []).filter(txn => !txn.is_voided);
     const from = state.exportForm.dateFrom;
@@ -221,6 +219,8 @@ export default function AppModals({
     const totalCr = filtered.filter(txn => txn.type === "credit").reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
     const totalDr = filtered.filter(txn => txn.type === "debit").reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
 
+    // Loaded on first export: jsPDF is large and most sessions never use it.
+    const [{ jsPDF }, { default: autoTable }] = await Promise.all([import("jspdf"), import("jspdf-autotable")]);
     const doc = new jsPDF();
     doc.setFontSize(18);
     doc.text(state.exportForm.orgName || "FundVault", 14, 20);
