@@ -288,6 +288,13 @@ export default function FundVaultApp() {
     }
   };
 
+  // A transaction change only moves its own fund, so it refetches that fund
+  // rather than every fund's full ledger; fund-level changes refresh the list.
+  const refreshAfter = scope =>
+    scope === "txn"
+      ? Promise.all([loadCurrentDb(currentDbId), refreshAudit(), refreshOverview()])
+      : Promise.all([hydrateDatabases(), refreshAudit(), refreshTrash(), refreshOverview()]);
+
   const runPostLoginLoad = async () => {
     try {
       try {
@@ -296,7 +303,7 @@ export default function FundVaultApp() {
         if (err.status === 401) throw err;
         // Viewers may not post, and a failed run is retried next login.
       }
-      await Promise.all([hydrateDatabases(), refreshAudit(), refreshTrash(), refreshOverview()]);
+      await refreshAfter("fund");
     } catch (err) {
       // A 401 has already signed the user out; anything else is worth saying.
       if (err.status !== 401) toast(`Could not load your data: ${err.message}`, "error");
@@ -346,9 +353,7 @@ export default function FundVaultApp() {
       setModals(prev => ({ ...prev, createDb: false }));
       setCreateDbForm({ name: "", description: "", lowBalanceThreshold: "", approvalThreshold: "" });
       toast(`Database "${created.name}" created successfully`, "success");
-      await hydrateDatabases();
-      await refreshAudit();
-      await refreshOverview();
+      await refreshAfter("fund");
       await loadCurrentDb(created.id);
     } catch (err) {
       toast(err.message, "error");
@@ -373,9 +378,7 @@ export default function FundVaultApp() {
       });
       setModals(prev => ({ ...prev, editDb: false }));
       toast("Database updated", "success");
-      await hydrateDatabases();
-      await refreshAudit();
-      await refreshOverview();
+      await refreshAfter("fund");
       if (activeTab === "db") await loadCurrentDb(currentDbId);
     } catch (err) {
       toast(err.message, "error");
@@ -394,7 +397,7 @@ export default function FundVaultApp() {
         setTransactions([]);
         setActiveTab("home");
       }
-      await Promise.all([hydrateDatabases(), refreshAudit(), refreshTrash(), refreshOverview()]);
+      await refreshAfter("fund");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -405,7 +408,7 @@ export default function FundVaultApp() {
     try {
       const response = await authedRequest(`/databases/${currentDbId}/archive`, { method: "POST" });
       toast(response.is_archived ? "Database archived" : "Database unarchived", "success");
-      await Promise.all([hydrateDatabases(), refreshAudit(), refreshOverview(), loadCurrentDb(currentDbId)]);
+      await Promise.all([refreshAfter("fund"), loadCurrentDb(currentDbId)]);
     } catch (err) {
       toast(err.message, "error");
     }
@@ -484,7 +487,7 @@ export default function FundVaultApp() {
           toast(`Transaction recorded, but the receipt upload failed: ${uploadErr.message}. Please try attaching it again.`, "warning");
         }
       }
-      await Promise.all([loadCurrentDb(currentDbId), hydrateDatabases(), refreshAudit(), refreshOverview()]);
+      await refreshAfter("txn");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -516,7 +519,7 @@ export default function FundVaultApp() {
       });
       setModals(prev => ({ ...prev, editTxn: false }));
       toast("Transaction updated", "success");
-      await Promise.all([loadCurrentDb(currentDbId), hydrateDatabases(), refreshAudit(), refreshOverview()]);
+      await refreshAfter("txn");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -537,7 +540,7 @@ export default function FundVaultApp() {
       setVoidReason("");
       setVoidTransactionId("");
       toast("Transaction voided", "info");
-      await Promise.all([loadCurrentDb(currentDbId), hydrateDatabases(), refreshAudit(), refreshOverview()]);
+      await refreshAfter("txn");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -547,7 +550,7 @@ export default function FundVaultApp() {
     try {
       await authedRequest(`/transactions/${txnId}/approve`, { method: "POST" });
       toast("Transaction approved", "success");
-      await Promise.all([loadCurrentDb(currentDbId), hydrateDatabases(), refreshAudit(), refreshOverview()]);
+      await refreshAfter("txn");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -558,7 +561,7 @@ export default function FundVaultApp() {
     try {
       await authedRequest(`/transactions/${txnId}/delete`, { method: "DELETE" });
       toast("Voided transaction deleted", "info");
-      await Promise.all([loadCurrentDb(currentDbId), hydrateDatabases(), refreshAudit(), refreshOverview()]);
+      await refreshAfter("txn");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -630,7 +633,7 @@ export default function FundVaultApp() {
       setModals(prev => ({ ...prev, merge: false }));
       setMergeForm({ sourceId: "", targetId: "", name: "" });
       toast("Databases merged successfully", "success");
-      await Promise.all([hydrateDatabases(), refreshAudit(), refreshOverview()]);
+      await refreshAfter("fund");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -640,7 +643,7 @@ export default function FundVaultApp() {
     try {
       await authedRequest(`/trash/${itemId}/restore`, { method: "POST" });
       toast("Item restored", "success");
-      await Promise.all([hydrateDatabases(), refreshAudit(), refreshTrash(), refreshOverview()]);
+      await refreshAfter("fund");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -651,7 +654,7 @@ export default function FundVaultApp() {
     try {
       await authedRequest(`/trash/${itemId}`, { method: "DELETE" });
       toast("Permanently deleted", "info");
-      await Promise.all([hydrateDatabases(), refreshTrash(), refreshOverview()]);
+      await refreshAfter("fund");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -662,7 +665,7 @@ export default function FundVaultApp() {
     try {
       await authedRequest("/trash", { method: "DELETE" });
       toast("Trash emptied", "info");
-      await Promise.all([hydrateDatabases(), refreshTrash(), refreshOverview()]);
+      await refreshAfter("fund");
     } catch (err) {
       toast(err.message, "error");
     }
