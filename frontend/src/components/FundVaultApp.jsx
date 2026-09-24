@@ -97,6 +97,13 @@ export default function FundVaultApp() {
     orgSettings: false
   });
 
+  // `restored` gates rendering until localStorage has been read, so a signed-in
+  // user never flashes the gateway. The post-login load is pending while the
+  // token it ran for differs from the current one.
+  const [restored, setRestored] = useState(false);
+  const [loadedToken, setLoadedToken] = useState("");
+  const loading = Boolean(token) && loadedToken !== token;
+
   const [toasts, setToasts] = useState([]);
   const currentDb = useMemo(() => databases.find(db => db.id === currentDbId) || null, [databases, currentDbId]);
 
@@ -106,7 +113,38 @@ export default function FundVaultApp() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
   };
 
-  const authedRequest = (endpoint, options = {}) => apiRequest(`/api${endpoint}`, options, token);
+  const resetSession = () => {
+    setToken("");
+    setCurrentUser(null);
+    setCurrentOrg(null);
+    setDatabases([]);
+    setCurrentDbId(null);
+    setTransactions([]);
+    setAuditLogs([]);
+    setTrashItems([]);
+    setRecurringItems([]);
+    setManagedUsers([]);
+    setOverview(null);
+    setActiveTab("home");
+    localStorage.removeItem("fundvault_token");
+    localStorage.removeItem("fundvault_currentUser");
+    localStorage.removeItem("fundvault_org");
+  };
+
+  const authedRequest = async (endpoint, options = {}) => {
+    try {
+      return await apiRequest(`/api${endpoint}`, options, token);
+    } catch (err) {
+      // An expired session 401s every request. Only the first one (while this
+      // token is still the stored one) signs out, so a batch of parallel
+      // requests toasts once and a stale reply never ends a newer session.
+      if (err.status === 401 && token && localStorage.getItem("fundvault_token") === token) {
+        resetSession();
+        toast("Session expired, please sign in again", "error");
+      }
+      throw err;
+    }
+  };
 
   const refreshOverview = async () => {
     if (!token) return;
@@ -252,11 +290,19 @@ export default function FundVaultApp() {
 
   const runPostLoginLoad = async () => {
     try {
-      await authedRequest("/recurring/process", { method: "POST" });
-    } catch (_err) {
-      // ignore
+      try {
+        await authedRequest("/recurring/process", { method: "POST" });
+      } catch (err) {
+        if (err.status === 401) throw err;
+        // Viewers may not post, and a failed run is retried next login.
+      }
+      await Promise.all([hydrateDatabases(), refreshAudit(), refreshTrash(), refreshOverview()]);
+    } catch (err) {
+      // A 401 has already signed the user out; anything else is worth saying.
+      if (err.status !== 401) toast(`Could not load your data: ${err.message}`, "error");
+    } finally {
+      setLoadedToken(token);
     }
-    await Promise.all([hydrateDatabases(), refreshAudit(), refreshTrash(), refreshOverview()]);
   };
 
   const handleAuthenticated = ({ token: nextToken, user, org }) => {
@@ -271,21 +317,7 @@ export default function FundVaultApp() {
 
   const logout = async () => {
     const logoutToken = token;
-    setToken("");
-    setCurrentUser(null);
-    setCurrentOrg(null);
-    setDatabases([]);
-    setCurrentDbId(null);
-    setTransactions([]);
-    setAuditLogs([]);
-    setTrashItems([]);
-    setRecurringItems([]);
-    setManagedUsers([]);
-    setOverview(null);
-    setActiveTab("home");
-    localStorage.removeItem("fundvault_token");
-    localStorage.removeItem("fundvault_currentUser");
-    localStorage.removeItem("fundvault_org");
+    resetSession();
     if (logoutToken) {
       try {
         await apiRequest("/api/auth/logout", { method: "POST" }, logoutToken);
@@ -865,6 +897,7 @@ export default function FundVaultApp() {
     }
     const savedOrg = localStorage.getItem("fundvault_org");
     if (savedOrg) setCurrentOrg(JSON.parse(savedOrg));
+    setRestored(true);
   }, []);
 
   useEffect(() => {
@@ -933,6 +966,8 @@ export default function FundVaultApp() {
     localStorage.setItem("fundvault_theme", theme);
   }, [theme]);
 
+  if (!restored) return null;
+
   if (!currentUser || !token) {
     return (
       <>
@@ -973,6 +1008,7 @@ export default function FundVaultApp() {
         <HomeView
           databases={databases}
           auditLogs={auditLogs}
+          loading={loading}
           onOpenDb={loadCurrentDb}
           onOpenCreateDb={() => setModals(prev => ({ ...prev, createDb: true }))}
           onOpenMerge={() => setModals(prev => ({ ...prev, merge: true }))}

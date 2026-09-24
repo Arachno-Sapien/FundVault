@@ -3,6 +3,7 @@ import { fmt, formatDateShort, relativeTime } from "lib/format";
 export default function HomeView({
   databases,
   auditLogs,
+  loading = false,
   onOpenDb,
   onOpenCreateDb,
   onOpenMerge,
@@ -44,7 +45,7 @@ export default function HomeView({
       <div className="db-grid">
         {activeDbs.length === 0 && (
           <div className="db-card" style={{ gridColumn: "1/-1", textAlign: "center" }}>
-            No databases yet. Click <strong>+ New Database</strong> to get started.
+            {loading ? "Loading…" : <>No databases yet. Click <strong>+ New Database</strong> to get started.</>}
           </div>
         )}
 

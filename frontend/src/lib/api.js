@@ -1,5 +1,12 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
+// Callers need the status (a 401 means the session is gone), not just the text.
+function httpError(payload, status, fallback) {
+  const err = new Error(payload?.error || `${fallback} (${status})`);
+  err.status = status;
+  return err;
+}
+
 export async function apiRequest(endpoint, options = {}, token = null) {
   const headers = {
     "Content-Type": "application/json",
@@ -22,7 +29,7 @@ export async function apiRequest(endpoint, options = {}, token = null) {
   }
 
   if (!response.ok) {
-    throw new Error(payload?.error || `Request failed (${response.status})`);
+    throw httpError(payload, response.status, "Request failed");
   }
   return payload;
 }
@@ -39,7 +46,7 @@ export async function extractReceipt(file, token) {
   });
   let payload = null;
   try { payload = await response.json(); } catch (_) { payload = null; }
-  if (!response.ok) throw new Error(payload?.error || `Extraction failed (${response.status})`);
+  if (!response.ok) throw httpError(payload, response.status, "Extraction failed");
   return payload;
 }
 
@@ -53,7 +60,7 @@ export async function uploadReceipt(transactionId, file, token) {
   });
   let payload = null;
   try { payload = await response.json(); } catch (_) { payload = null; }
-  if (!response.ok) throw new Error(payload?.error || `Upload failed (${response.status})`);
+  if (!response.ok) throw httpError(payload, response.status, "Upload failed");
   return payload;
 }
 
