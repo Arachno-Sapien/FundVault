@@ -25,6 +25,11 @@ const defaultTxnFilters = {
   amountMax: ""
 };
 
+// The print window shares this origin, so any user text written into it must
+// be escaped or a Member's sender field runs script with an Owner's token.
+const esc = value =>
+  String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
+
 export default function FundVaultApp() {
   const [theme, setTheme] = useState("dark");
   const [activeTab, setActiveTab] = useState("home");
@@ -803,10 +808,10 @@ export default function FundVaultApp() {
         th{background:#333;color:#fff}
         .credit{color:green}.debit{color:red}
       </style>
-      <h1>FundVault - ${currentDb.name}</h1>
+      <h1>FundVault - ${esc(currentDb.name)}</h1>
       <h2>Transaction Ledger</h2>
-      <p>Generated on ${formatDate(new Date().toISOString())}</p>
-      <div><strong>Total Credits:</strong> ${fmt(totalCr)} • <strong>Total Debits:</strong> ${fmt(totalDr)} • <strong>Balance:</strong> ${fmt(currentDb.balance)}</div>
+      <p>Generated on ${esc(formatDate(new Date().toISOString()))}</p>
+      <div><strong>Total Credits:</strong> ${esc(fmt(totalCr))} • <strong>Total Debits:</strong> ${esc(fmt(totalDr))} • <strong>Balance:</strong> ${esc(fmt(currentDb.balance))}</div>
       <table>
         <tr><th>#</th><th>Date</th><th>Type</th><th>Amount</th><th>Sender</th><th>Receiver</th><th>Mode</th><th>Balance</th></tr>
         ${txns
@@ -814,13 +819,13 @@ export default function FundVaultApp() {
             (txn, idx) => `
             <tr>
               <td>${idx + 1}</td>
-              <td>${new Date(txn.date).toLocaleDateString("en-IN")}</td>
-              <td class="${txn.type}">${txn.type.toUpperCase()}</td>
-              <td class="${txn.type}">${fmt(txn.amount)}</td>
-              <td>${txn.sender || "-"}</td>
-              <td>${txn.receiver || "-"}</td>
-              <td>${txn.mode}</td>
-              <td>${fmt(txn.running_balance)}</td>
+              <td>${esc(new Date(txn.date).toLocaleDateString("en-IN"))}</td>
+              <td class="${esc(txn.type)}">${esc(String(txn.type).toUpperCase())}</td>
+              <td class="${esc(txn.type)}">${esc(fmt(txn.amount))}</td>
+              <td>${esc(txn.sender || "-")}</td>
+              <td>${esc(txn.receiver || "-")}</td>
+              <td>${esc(txn.mode)}</td>
+              <td>${esc(fmt(txn.running_balance))}</td>
             </tr>`
           )
           .join("")}
