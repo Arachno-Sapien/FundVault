@@ -6,46 +6,22 @@ from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
 from apps.ledger.models import DatabaseFund, RecurringTransaction, TransactionFund
-from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# See tests/test_ledger_permissions.py for why this alias must exist at import
-# time: Django computes each TestCase's database allowlist before setUp runs.
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
-class LedgerMoneyTests(TestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class LedgerMoneyTests(OrgTestMixin, TestCase):
     def setUp(self):
         self.client = Client()
         Org.objects.create(
             id="o1", name="Acme", slug="acme",
             owner_email="o@example.com", db_connection=TENANT_URL,
         )
-        token = create_session_token("u_owner", "o1")
+        token = self.make_user("u_owner", "owner", username="owner", email="o@example.com")
         self.auth = {"HTTP_AUTHORIZATION": f"Bearer {token}"}
         with org_context(ORG_ALIAS):
-            User.objects.create(
-                id="u_owner", username="owner", email="o@example.com",
-                password_hash="x", role="owner", is_active=True,
-            )
-            Session.objects.create(
-                id="s_owner", user_id="u_owner", token=token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
             DatabaseFund.objects.create(id="f1", name="Fund", created_by_id="u_owner")
 
     def _send(self, method, url, body):
