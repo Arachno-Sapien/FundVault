@@ -120,9 +120,9 @@ succeeds — a failed attempt leaves nothing behind to retry against.
 
 - `400`: All fields required / Password must be at least 6 characters / a
   connection or migration failure message (e.g. "Authentication failed —
-  check the username and password.", "That host cannot be used for a tenant
-  database connection.", "An organisation with a similar name already
-  exists — try a different name.", or — for an IPv6-only host such as
+  check the username and password.", "That host cannot be used.", "An
+  organisation with a similar name already exists — try a different
+  name.", or — for an IPv6-only host such as
   Supabase's direct `db.<ref>.supabase.co` — a message pointing at the
   provider's IPv4 connection pooler instead)
 - `405`: Method not allowed
@@ -803,6 +803,12 @@ open to any role, including Viewer.
   "approvalThreshold": "float (optional)"
 }
 ```
+
+This is a full replace, not a merge: `description`, `lowBalanceThreshold`
+and `approvalThreshold` are each read fresh from the body, so omitting one
+resets it (thresholds reset to `0`, description to `""`) rather than
+keeping the database's current value. See the Notes section for how
+`lowBalanceThreshold`/`approvalThreshold` values are parsed.
 
 **Response (200):** the updated database (same shape as `POST /databases`).
 
@@ -1549,9 +1555,8 @@ Notes:
   transaction. `created_by` and `approved_by` are both recorded on every
   transaction, so a self-approval is always visible in the audit trail even
   though it isn't blocked.
-- A `403` from any gated endpoint returns `{"error": "You do not have
-  permission to do that"}`, except the join-code endpoints, which return
-  `{"error": "Admin access required"}`.
+- A `403` from any gated endpoint, the join-code endpoints included,
+  returns `{"error": "You do not have permission to do that"}`.
 
 ---
 
@@ -1683,14 +1688,23 @@ can't be reached is reported and skipped rather than failing the whole run.
 - All timestamps are stored in UTC with timezone offset information.
 - Fund balances and transaction amounts are stored as floats, not fixed-point
   decimals. Every computed amount and balance is rounded to 2 decimal places.
-- `amount`, `lowBalanceThreshold` and `approvalThreshold` must be finite
-  numbers: `nan`, `inf`/`-inf`, booleans and non-numeric values (a string
-  that doesn't parse as a number, `null`, an object) are all rejected with
-  `400` (`Thresholds must be numbers` for the database endpoints, or the
-  relevant amount validation error for transactions).
+- `amount` must be a finite number: `nan`, `inf`/`-inf`, booleans, `null`,
+  and non-numeric values (a string that doesn't parse as a number, an
+  object) are all rejected with the relevant amount validation error
+  (e.g. `Amount must be greater than 0`).
+- `lowBalanceThreshold` and `approvalThreshold` are read with
+  `payload.get(field) or 0`, so a falsy value — an omitted field, `null`,
+  `false`, `""`, `{}`, or `[]` — is silently stored as `0` rather than
+  rejected. For `approvalThreshold`, `0` means no approval gating: Member
+  transactions above it are no longer held for Admin/Owner approval. Only a
+  *truthy* non-numeric value reaches the numeric check and gets rejected
+  with `400` (`Thresholds must be numbers`): `nan`/`inf`/`-inf`, `true`, a
+  non-empty non-numeric string, or a non-empty object/array.
 - A JSON request body that isn't an object (an array, a bare number/string,
-  or invalid JSON) is treated as an empty object, so it fails the endpoint's
-  own required-field checks with `400` rather than a parse error.
+  or invalid JSON) is treated as an empty object, so endpoints with
+  required fields answer `400`; an endpoint with no required fields (e.g.
+  `PUT /transactions/<id>/edit`) simply treats it as a no-op edit and
+  returns `200`.
 - Receipts are never stored inline as base64 — only an object key
   (`receipt_key`) plus a signed URL minted at read time (`receipt_url`,
   ~1 hour validity). An org without storage configured simply has no
