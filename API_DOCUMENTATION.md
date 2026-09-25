@@ -27,6 +27,10 @@ gated by role where noted (see [Permissions](#permissions)).
 `POST /api/auth/login` is also unauthenticated but still org-scoped: it takes
 an `orgId` in the request body (there is no token yet to carry one).
 
+A session's `last_activity` is set at login and is not touched again on
+subsequent authenticated requests — reading it does not tell you when the
+user was last active, only when they logged in.
+
 ---
 
 ## Table of Contents
@@ -118,7 +122,9 @@ succeeds — a failed attempt leaves nothing behind to retry against.
   connection or migration failure message (e.g. "Authentication failed —
   check the username and password.", "That host cannot be used for a tenant
   database connection.", "An organisation with a similar name already
-  exists — try a different name.")
+  exists — try a different name.", or — for an IPv6-only host such as
+  Supabase's direct `db.<ref>.supabase.co` — a message pointing at the
+  provider's IPv4 connection pooler instead)
 - `405`: Method not allowed
 - `500`: Could not create the owner account. Please try again.
 
@@ -204,6 +210,9 @@ with the role the code grants.
 Admin or Owner, and an Admin may only mint codes granting Member or Viewer —
 only the Owner may mint an Admin-granting code.
 
+`GET` lists only codes whose role the caller could themselves mint — an Admin
+does not see Owner-minted Admin codes, even though they exist in the org.
+
 **GET Response (200):**
 
 ```json
@@ -237,7 +246,7 @@ only the Owner may mint an Admin-granting code.
 - `400`: You cannot create a join code granting `<role>` / maxUses and
   expiresInDays must be numbers
 - `401`: Unauthorized
-- `403`: Admin access required
+- `403`: You do not have permission to do that
 - `405`: Method not allowed
 
 ---
@@ -248,6 +257,10 @@ only the Owner may mint an Admin-granting code.
 
 **Authentication:** Required (Admin or Owner).
 
+A code that exists but grants a role the caller could not mint (e.g. an Admin
+targeting the Owner's Admin-granting code) answers `404`, the same as a
+nonexistent code, so existence isn't revealed.
+
 **Response (200):**
 
 ```json
@@ -257,7 +270,7 @@ only the Owner may mint an Admin-granting code.
 **Error Responses:**
 
 - `401`: Unauthorized
-- `403`: Admin access required
+- `403`: You do not have permission to do that
 - `404`: Join code not found
 - `405`: Method not allowed
 
@@ -330,7 +343,11 @@ back in full through this endpoint by anyone, including another Owner.
 
 Both `storage` and `ai` are validated with a live probe call before being
 saved (a small object round-trip for storage, a cheap list/models call for
-AI) — a bad key or endpoint is rejected here rather than at first use.
+AI) — a bad key or endpoint is rejected here rather than at first use. A
+`storage` or `ai` value that isn't a JSON object — including `null` — is
+treated as an empty configuration and rejected the same way as one missing
+its required fields, rather than clearing the existing configuration; there
+is no way to clear it through this endpoint.
 
 **PUT Response (200):**
 
@@ -543,7 +560,8 @@ Owner specifically (`CHANGE_ROLE`); transferring ownership requires Owner
 ]
 ```
 
-Sorted admins/owners first, then by `created_at`.
+Sorted Owner, then Admin, then Member, then Viewer; within a role, by
+`created_at`.
 
 **Error Responses:**
 
@@ -857,7 +875,8 @@ archives the sources, and recalculates running balances.
 }
 ```
 
-**Response (200):** the newly created merged database.
+**Response (200):** the newly created merged database, with `balance` already
+recalculated from the copied transactions (not `0` or stale).
 
 **Error Responses:**
 
@@ -948,7 +967,7 @@ for convenience and always mirror it.
 ```json
 {
   "type": "credit or debit (required)",
-  "amount": "float (required, must be > 0)",
+  "amount": "float (required, must be > 0 and at most ₹1,000,000,000,000)",
   "date": "ISO 8601 datetime (required)",
   "sender": "string (optional)",
   "receiver": "string (optional)",
@@ -994,7 +1013,8 @@ receipt, then a receipt is attached separately with
 **Error Responses:**
 
 - `400`: Invalid transaction type / Invalid transaction mode / Amount must be
-  greater than 0 / Transaction date is required / Insufficient balance
+  greater than 0 / Amount must be at most ₹1,000,000,000,000 / Transaction
+  date is required / Insufficient balance
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Database not found
@@ -1027,7 +1047,8 @@ endpoint above).
 
 **Error Responses:**
 
-- `400`: Enter a valid amount / Cannot edit a voided transaction /
+- `400`: Amount must be greater than 0 / Amount must be at most
+  ₹1,000,000,000,000 / Cannot edit a voided transaction /
   Transaction date is required
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
@@ -1094,7 +1115,10 @@ compensating control for that is the audit trail (`created_by` and
 **DELETE** `/transactions/<transaction_id>/delete`
 
 Only valid for a transaction that is already voided; recalculates running
-balances for the fund afterward.
+balances for the fund afterward. If the transaction had a receipt, its image
+is removed from the org's object storage after the delete commits, unless
+another row still references the same key — this is best-effort and does not
+fail the request if the storage delete itself fails.
 
 **Response (200):**
 
@@ -1176,7 +1200,11 @@ being configured at all for this organisation, which returns `503`.
 Compresses and uploads the image to the organisation's configured object
 storage (max 1024px, JPEG quality 75) at
 `receipts/<database_id>/<transaction_id>.jpg`, and stores the object key on
-the transaction.
+the transaction. The key is deterministic per fund+transaction, so calling
+this again normally overwrites the same object in place; the one case where
+the old key differs (a transaction copied by `databases_merge`, which keeps
+its original key) has the old object removed from storage after commit,
+unless another row still references it.
 
 **Request Body:**
 
@@ -1230,7 +1258,7 @@ transactions).
     "description": "string",
     "next_run": "ISO 8601 date (YYYY-MM-DD)",
     "is_active": "boolean",
-    "created_by": "string (user id)",
+    "created_by": "string (user id) or null (creator's account was deleted)",
     "created_at": "ISO 8601 datetime"
   }
 ]
@@ -1253,7 +1281,7 @@ transactions).
 ```json
 {
   "type": "credit or debit (required)",
-  "amount": "float (required, must be > 0)",
+  "amount": "float (required, must be > 0 and at most ₹1,000,000,000,000)",
   "frequency": "daily, weekly, monthly, or yearly (required)",
   "description": "string (required)",
   "nextRun": "ISO 8601 date string (required, format: YYYY-MM-DD)"
@@ -1264,8 +1292,9 @@ transactions).
 
 **Error Responses:**
 
-- `400`: Invalid transaction type / Amount must be greater than 0 / Invalid
-  frequency / Description required / Invalid next run date
+- `400`: Invalid transaction type / Amount must be greater than 0 / Amount
+  must be at most ₹1,000,000,000,000 / Invalid frequency / Description
+  required / Invalid next run date
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Database not found
@@ -1299,7 +1328,18 @@ Deactivates it (`is_active` becomes `false`) rather than removing the row.
 **POST** `/recurring/process`
 
 Creates a real transaction for every active recurring transaction whose
-`next_run` has passed, and advances `next_run`.
+`next_run` has passed, and advances `next_run`. Overlapping calls (the
+frontend fires this on every app load) never post the same due rule twice —
+the second caller locks after the first and sees its already-advanced
+`next_run`.
+
+A created transaction is posted straight through only if the rule's creator
+is still an active Admin or Owner; otherwise it is gated exactly as if a
+Member had created it — pending approval (`requires_approval: true,
+approved: false`, balance unchanged) once its amount is at or above the
+fund's `approval_threshold`. This re-checks the creator's *current* standing
+on every run, not their standing when the rule was created. The audit log
+records "pending approval" instead of "auto-posted" for a gated rule.
 
 **Response (200):**
 
@@ -1407,6 +1447,11 @@ just their own.
 
 **DELETE** `/trash/<item_id>`
 
+For a trashed fund, every one of its transactions is deleted along with it;
+any receipt images they referenced are removed from the org's object storage
+after commit, unless another row still references the same key (best-effort;
+a storage failure does not fail the request).
+
 **Response (200):**
 
 ```json
@@ -1426,7 +1471,8 @@ just their own.
 
 **DELETE** `/trash`
 
-Permanently deletes every item in the organisation's trash.
+Permanently deletes every item in the organisation's trash, including the
+same per-item receipt cleanup as above.
 
 **Response (200):**
 
@@ -1463,10 +1509,8 @@ Totals across every non-deleted fund in the organisation.
 }
 ```
 
-When the organisation has no funds yet, the response instead has six keys —
-the four above (all zero) plus two empty placeholder arrays, `monthlyData`
-and `modeData`. Neither key is populated in the normal (non-zero) response
-above, and neither is currently consumed by the frontend.
+The response always has exactly these four keys, including when the
+organisation has no funds yet (all zero).
 
 **Error Responses:**
 
@@ -1623,6 +1667,14 @@ organisation's decision — see the design spec for the reasoning. Two
 client-side behaviors keep the obvious waste down: a failed extraction does
 not auto-retry, and an identical image hash within a session reuses its
 previous result rather than calling the provider again.
+
+## Operations
+
+`python backend/manage.py migrate_tenants` applies pending tenant migrations
+to every registered organisation's database — not exposed as an API endpoint,
+it is run by every deploy (see the README's [Deployment](README.md#deployment)
+section) after the control-plane migration. An organisation whose database
+can't be reached is reported and skipped rather than failing the whole run.
 
 ## Notes
 

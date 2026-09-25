@@ -29,7 +29,7 @@ The design behind this is in
 
 ```text
 FundVault/
-├── backend/                         # Django REST API
+├── backend/                         # Django API (plain function views)
 │   ├── apps/
 │   │   ├── accounts/                # Users, login, roles, admin member management
 │   │   ├── common/                  # JWT auth, audit logging, shared helpers
@@ -39,7 +39,10 @@ FundVault/
 │   ├── fundvault_backend/
 │   │   ├── settings.py              # Local/dev settings
 │   │   ├── settings_production.py   # Production settings (refuses to boot on defaults)
+│   │   ├── settings_test.py         # Isolated test settings — see Running the tests
+│   │   ├── test_runner.py           # Private per-alias test databases; blocks real DB access
 │   │   └── urls.py
+│   ├── tests/                       # support.py plus one module per feature area
 │   ├── manage.py
 │   └── requirements.txt
 ├── frontend/                        # Next.js web application
@@ -56,11 +59,12 @@ FundVault/
 
 ### Tech stack
 
-**Backend:** Django 5.2, Django REST Framework, JWT auth (PyJWT), bcrypt password hashing,
-`cryptography` (Fernet) for encrypting stored org credentials, django-cors-headers,
-psycopg 3 (Postgres only — this is a Postgres-only application, no SQLite), boto3
-for S3-compatible storage, `openai` client + `google-genai` for AI receipt
-extraction, Pillow for image processing, gunicorn + whitenoise for production.
+**Backend:** Django 5.2 (plain function views, no REST framework), JWT auth (PyJWT),
+bcrypt password hashing, `cryptography` (Fernet) for encrypting stored org
+credentials, django-cors-headers, psycopg 3 (Postgres only — this is a
+Postgres-only application, no SQLite), boto3 for S3-compatible storage,
+`openai` client + `google-genai` for AI receipt extraction, Pillow for image
+processing, gunicorn + whitenoise for production.
 
 **Frontend:** Next.js 16, React 19, Chart.js, jsPDF for PDF export.
 
@@ -86,7 +90,7 @@ a join code — that endpoint doesn't exist.
 
 ## Run it yourself
 
-Prerequisites: Python 3.11+, Node.js 18+, Docker (for local Postgres), Git.
+Prerequisites: Python 3.11+, Node.js 20.9+, Docker (for local Postgres), Git.
 
 1. **Start local Postgres** — one database for the control plane, one for a
    development tenant:
@@ -140,6 +144,16 @@ Or, on Windows, run `install.bat` once and `run.bat` every time after —
 AI keys and receipt storage credentials are **not** environment variables —
 each organisation configures its own from its org settings page after
 signing in (see [Bring your own](#bring-your-own)).
+
+### Running the tests
+With the dev Postgres containers up (`docker compose up -d`):
+
+    cd backend
+    python manage.py test --settings=fundvault_backend.settings_test
+
+The test runner creates private `test_*` copies of every database and refuses to
+connect to anything else, so tests never touch your dev data. To run two suites
+at once, give each its own suffix: `FUNDVAULT_TEST_DB_SUFFIX=_mine`.
 
 ## Roles
 
@@ -196,28 +210,71 @@ All three are configured per-organisation from the org settings page — see
 
 ## Deployment
 
-FundVault deploys as two independent services:
+FundVault runs as two services plus databases you own:
 
-- **Backend + control-plane database → [Render](https://render.com).**
-  `render.yaml` defines a Python web service (`gunicorn`, `settings_production`)
-  and a managed Postgres database for the control plane. Render generates
-  `DJANGO_SECRET_KEY` and `JWT_SECRET` for you; `FUNDVAULT_SECRET_KEY` you
-  must generate yourself (same command as above) and paste into Render's
-  environment — **it must never change once an organisation exists**, since
-  every stored connection string, storage config, and AI key is encrypted
-  under it. You'll also need to set `DJANGO_ALLOWED_HOSTS` and
-  `CORS_ALLOWED_ORIGINS` to your actual Render/Vercel hostnames.
-  `settings_production.py` refuses to boot if any required secret is missing
-  or left at its development default.
-- **Frontend → [Vercel](https://vercel.com).** `frontend/vercel.json` sets the
-  Next.js build/install commands and security headers. Point
-  `NEXT_PUBLIC_API_BASE` (see `frontend/.env.example`) at your deployed
-  Render backend's URL.
+| Piece | Where | Notes |
+|---|---|---|
+| API (Django + gunicorn) | Render web service from `render.yaml` | each deploy runs `backend/build.sh` |
+| Control-plane Postgres | any Postgres that doesn't expire — e.g. a Neon project, or a paid Render Postgres | holds organisations, join codes, the email index, and every org's encrypted connection string |
+| Frontend (Next.js) | Vercel, Root Directory `frontend` | a static page that talks to the API |
+| Each organisation's data | that organisation's own Postgres (Neon, or Supabase's **Session pooler** string) | entered when the organisation is created |
 
-Deploying is: push the backend to Render (it reads `render.yaml`), push the
-frontend to Vercel with `NEXT_PUBLIC_API_BASE` set to the Render service's
-URL, and set the Render env vars above. There's no live instance to point at
-here — the steps above are how to stand up your own.
+### 1. Control-plane database
+Create a Postgres database that will not expire and copy its connection string
+(keep `?sslmode=require`). Render's free Postgres is deleted 30 days after
+creation, which would orphan every organisation, so `render.yaml` does not
+create one.
+
+### 2. Encryption key
+    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+Keep it in a password manager. It encrypts every stored organisation
+credential; if it changes or is lost, every organisation becomes unreachable.
+The API refuses to start with a missing or malformed key.
+
+### 3. Backend on Render
+New → Blueprint → pick this repository (branch `main`). Render asks for:
+- `DATABASE_URL` — the connection string from step 1
+- `FUNDVAULT_SECRET_KEY` — the key from step 2
+- `CORS_ALLOWED_ORIGINS` — your Vercel URL, e.g. `https://fundvault.vercel.app`
+  (a placeholder is fine now; fix it after step 4)
+
+`DJANGO_SECRET_KEY` and `JWT_SECRET` are generated for you. The service's own
+`*.onrender.com` hostname is allowed automatically; set `DJANGO_ALLOWED_HOSTS`
+only if you add a custom domain.
+
+Every deploy installs dependencies, migrates the control plane, then runs
+`python backend/manage.py migrate_tenants` to bring each organisation's database
+up to date. An organisation whose database can't be reached is logged as
+`FAILED` in the build log without failing the deploy; it stays on the old schema
+until a later deploy reaches it.
+
+Check it: `curl https://<service>.onrender.com/api/health` → `{"status": "ok"}`.
+On the free plan the service sleeps after 15 idle minutes and the next request
+takes about a minute.
+
+### 4. Frontend on Vercel
+Add New → Project → import this repository → **Root Directory: `frontend`** →
+environment variable `NEXT_PUBLIC_API_BASE=https://<service>.onrender.com`
+(no trailing slash) → Deploy. The build fails on purpose if the variable is
+missing. Then put the Vercel production URL into Render's
+`CORS_ALLOWED_ORIGINS` (Render redeploys by itself).
+
+### 5. First organisation
+Open the Vercel URL → **Create organisation** → paste the organisation's
+Postgres connection string: any Neon string, or Supabase's *Session pooler*
+string (`…pooler.supabase.com:5432`). Supabase's direct `db.<ref>.supabase.co`
+host is IPv6-only and Render can't reach it — FundVault tells you so if you try.
+Invite people from the user menu → **Invite members**.
+
+Receipt storage (any S3-compatible bucket) and AI receipt extraction (any
+OpenAI-compatible provider) are optional; the Owner sets them up under
+**Organisation settings**.
+
+### Known limits
+- Rate limits count requests per client IP as the API sees it. Behind Render's
+  proxy that may be the proxy's address, so limits could be shared between users;
+  check one request's `X-Forwarded-For` after deploying before relying on them.
+- Rate-limit counters live in each worker's memory and reset when it restarts.
 
 ## Troubleshooting
 
