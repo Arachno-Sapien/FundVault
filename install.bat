@@ -41,25 +41,8 @@ echo.
 
 REM Check if .env file exists
 if not exist "backend\.env" (
-    echo [Setup] Creating backend\.env file...
-    (
-        echo # Django
-        echo DJANGO_SECRET_KEY=change-me-in-production
-        echo DJANGO_DEBUG=true
-        echo DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
-        echo.
-        echo # Auth
-        echo JWT_SECRET=change-me-in-production
-        echo SESSION_HOURS=24
-        echo.
-        echo # Encryption key for stored org credentials. Generate with:
-        echo #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-        echo FUNDVAULT_SECRET_KEY=
-        echo.
-        echo # Databases
-        echo DATABASE_URL=postgres://fundvault:devpassword@127.0.0.1:5433/fundvault_control
-        echo DEV_TENANT_DATABASE_URL=postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev
-    ) > backend\.env
+    echo [Setup] Creating backend\.env from backend\.env.example...
+    copy /Y backend\.env.example backend\.env >nul
     echo [Setup] backend\.env file created. Please update API keys as needed.
     echo.
 )

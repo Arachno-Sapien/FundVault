@@ -38,6 +38,9 @@ backend/.env
 *.swp
 *.swo
 
+# Local Claude Code launch configs and worktrees
+.claude/
+
 # Logs
 *.log
 coverage/
