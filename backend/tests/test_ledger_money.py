@@ -1,11 +1,13 @@
 import json
 from datetime import timedelta
+from unittest import mock
 
 from django.db import connections
 from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
+from apps.ledger import views as ledger_views
 from apps.ledger.models import DatabaseFund, RecurringTransaction, TransactionFund
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
@@ -156,3 +158,58 @@ class LedgerMoneyTests(OrgTestMixin, TestCase):
         self.assertEqual(self._fund().balance, 499.0)
         with org_context(ORG_ALIAS):
             self.assertEqual(TransactionFund.objects.get(id="t0499").running_balance, 499.0)
+
+    def test_zero_amount_message_is_exact(self):
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=10.0,
+                date=timezone.now(), mode="cash", running_balance=10.0,
+            )
+        response = self._post_txn("credit", 0)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Amount must be greater than 0")
+        response = self._send("put", "/api/transactions/t1", {"amount": 0})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Amount must be greater than 0")
+
+    def test_approve_re_checks_the_transaction_under_lock(self):
+        # The view reads the transaction row before it takes the fund lock.
+        # If an Admin's PUT edits that pending debit's amount in the window
+        # between that read and the lock, approving against the stale copy
+        # would pass the balance check on the old (smaller) amount and then
+        # recalculate_running_balances would rebuild from the *edited*
+        # (larger) amount actually in the database, driving the fund negative.
+        real_lock_fund = ledger_views.lock_fund
+
+        def edit_then_lock(database_id):
+            # Simulate that concurrent edit landing right here: after this
+            # view's first, lock-free read of the transaction, before the
+            # fund lock below.
+            TransactionFund.objects.filter(id="t1").update(amount=2000.0)
+            return real_lock_fund(database_id)
+
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="debit", amount=30.0,
+                date=timezone.now(), mode="cash", running_balance=0.0,
+                requires_approval=True, approved=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=1000.0)
+
+        with mock.patch("apps.ledger.views.lock_fund", side_effect=edit_then_lock):
+            response = self._send("post", "/api/transactions/t1/approve", {})
+
+        self.assertEqual(response.status_code, 400, response.content)
+        with org_context(ORG_ALIAS):
+            txn = TransactionFund.objects.get(id="t1")
+        self.assertFalse(txn.approved)
+        self.assertGreaterEqual(self._fund().balance, 0)
+        self.assertEqual(self._fund().balance, 1000.0)
+
+    def test_cannot_post_a_transaction_to_an_archived_fund(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.filter(id="f1").update(is_archived=True)
+        response = self._post_txn("credit", 10)
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "This fund is archived")
+        self.assertEqual(self._fund().balance, 0.0)

@@ -74,6 +74,63 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
         ]
         self.assertLessEqual(len(ledger_queries), 2, ledger_queries)
 
+    def test_overview_totals_are_rounded_to_paise(self):
+        # 0.1 + 0.2 is 0.30000000000000004 in binary floating point, whether
+        # the addition happens in Postgres' SUM() or in Python.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="f1", name="Fund 1", balance=0.1, created_by_id="u_owner")
+            DatabaseFund.objects.create(id="f2", name="Fund 2", balance=0.2, created_by_id="u_owner")
+            now = timezone.now()
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=0.1,
+                date=now, mode="cash", running_balance=0.1,
+            )
+            TransactionFund.objects.create(
+                id="t2", database_id="f2", type="credit", amount=0.2,
+                date=now, mode="cash", running_balance=0.2,
+            )
+        response = self.client.get("/api/analytics/overview", **self.owner_auth)
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertEqual(body["totalBalance"], 0.3)
+        self.assertEqual(body["totalCredits"], 0.3)
+
+    def test_merge_locks_both_funds_before_reading_their_transactions(self):
+        # A transaction posted to either fund during the merge must serialize
+        # against it (never land after the merge has already read their rows)
+        # or it is silently left behind, orphaned, in an archived fund once
+        # the merge is done. Locking both funds up front -- in sorted-id
+        # order, so two concurrent merges can't deadlock each other -- is
+        # what gives that guarantee; check the queries actually happen in
+        # that order.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="zzz_source", name="Source", created_by_id="u_owner")
+            DatabaseFund.objects.create(id="aaa_target", name="Target", created_by_id="u_owner")
+        with CaptureQueriesContext(connections[ORG_ALIAS]) as queries:
+            response = self.client.post(
+                "/api/databases/merge",
+                data=json.dumps({"sourceId": "zzz_source", "targetId": "aaa_target", "name": "Merged"}),
+                content_type="application/json", **self.owner_auth,
+            )
+        self.assertEqual(response.status_code, 200, response.content)
+        sql_statements = [q["sql"] for q in queries.captured_queries]
+        read_indexes = [
+            i for i, sql in enumerate(sql_statements)
+            if '"transactions"' in sql and " IN (" in sql
+        ]
+        self.assertEqual(len(read_indexes), 1, sql_statements)
+        # Locks on the merged fund itself (recalculate_running_balances) come
+        # later, after the read; only the two locks preceding it are source's
+        # and target's.
+        lock_indexes = [
+            i for i, sql in enumerate(sql_statements[: read_indexes[0]])
+            if "FOR UPDATE" in sql and '"databases"' in sql
+        ]
+        self.assertEqual(len(lock_indexes), 2, sql_statements)
+        # Sorted-id (deadlock-safe) order: "aaa_target" locked before "zzz_source".
+        self.assertIn("aaa_target", sql_statements[lock_indexes[0]])
+        self.assertIn("zzz_source", sql_statements[lock_indexes[1]])
+
     def test_overview_with_no_funds_has_the_same_four_keys(self):
         response = self.client.get("/api/analytics/overview", **self.owner_auth)
         self.assertEqual(response.status_code, 200)
@@ -143,6 +200,26 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
         self.assertTrue(created[0].requires_approval)
         self.assertFalse(created[0].approved)
         with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1000.0)
+
+    def test_process_due_recurring_skips_rules_on_an_archived_fund(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(
+                id="f1", name="Fund", balance=1000.0, is_archived=True, created_by_id="u_owner",
+            )
+            RecurringTransaction.objects.create(
+                id="r1", database_id="f1", type="credit", amount=50.0,
+                frequency="monthly", description="rent",
+                next_run=timezone.now().date(), is_active=True,
+                created_by_id="u_owner",
+            )
+            owner = User.objects.get(id="u_owner")
+            created = process_due_recurring(owner)
+        self.assertEqual(created, [])
+        with org_context(ORG_ALIAS):
+            # Left due, not silently advanced: unarchiving the fund later
+            # should let it run rather than having skipped a cycle forever.
+            self.assertEqual(RecurringTransaction.objects.get(id="r1").next_run, timezone.now().date())
             self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1000.0)
 
     def test_merge_response_carries_the_real_balance(self):

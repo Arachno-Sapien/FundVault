@@ -205,11 +205,21 @@ class CodeManagementTests(OrgTestMixin, TestCase):
 
     def test_admin_cannot_revoke_an_admin_code(self):
         admin_code = json.loads(self._mint(self.owner_token, "admin").content)["code"]
-        response = self.client.delete(
-            f"/api/orgs/codes/{admin_code}", HTTP_AUTHORIZATION=f"Bearer {self.admin_token}"
-        )
+        auth = {"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+        response = self.client.delete(f"/api/orgs/codes/{admin_code}", **auth)
         self.assertEqual(response.status_code, 404)
         self.assertFalse(JoinCode.objects.get(code=admin_code).revoked)
+
+        # Answers exactly like a nonexistent code -- an Admin must not be able
+        # to tell "exists but I can't touch it" apart from "doesn't exist" at all.
+        nonexistent_response = self.client.delete("/api/orgs/codes/FUNDVAULT-ZZZZ-ZZZZ", **auth)
+        self.assertEqual(nonexistent_response.status_code, 404)
+        self.assertEqual(response.json(), nonexistent_response.json())
+
+        # The Admin is not blocked from revoking codes in general, only ones
+        # they could not have minted themselves.
+        viewer_code = json.loads(self._mint(self.owner_token, "viewer").content)["code"]
+        self.assertEqual(self.client.delete(f"/api/orgs/codes/{viewer_code}", **auth).status_code, 200)
 
     def test_admin_can_still_list_and_revoke_member_and_viewer_codes(self):
         member_code = json.loads(self._mint(self.owner_token, "member").content)["code"]
