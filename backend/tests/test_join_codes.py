@@ -213,6 +213,13 @@ class CodeManagementTests(TestCase):
     def test_member_cannot_mint_any_code(self):
         self.assertEqual(self._mint(self.member_token).status_code, 403)
 
+    def test_member_cannot_list_or_revoke_codes(self):
+        code = json.loads(self._mint(self.owner_token).content)["code"]
+        auth = {"HTTP_AUTHORIZATION": f"Bearer {self.member_token}"}
+        self.assertEqual(self.client.get("/api/orgs/codes", **auth).status_code, 403)
+        self.assertEqual(self.client.delete(f"/api/orgs/codes/{code}", **auth).status_code, 403)
+        self.assertFalse(JoinCode.objects.get(code=code).revoked)
+
     def test_minted_code_is_shaped_correctly(self):
         response = self._mint(self.owner_token)
         self.assertRegex(json.loads(response.content)["code"], r"^FUNDVAULT-")

@@ -102,8 +102,8 @@ def create_org(request):
     return JsonResponse({"org": serialize_org(org), "token": token, "user": serialize_user(user)})
 
 
-# Which roles each role may hand out. Owner is absent from every list:
-# ownership transfers explicitly, never through an invite.
+# Which roles each role with MANAGE_MEMBERS may hand out. Owner is absent from
+# every list: ownership transfers explicitly, never through an invite.
 MINTABLE = {
     User.Role.OWNER: {User.Role.ADMIN, User.Role.MEMBER, User.Role.VIEWER},
     User.Role.ADMIN: {User.Role.MEMBER, User.Role.VIEWER},
@@ -205,10 +205,13 @@ def join_org(request):
 def join_codes(request):
     org = request.fv_org
     actor = request.fv_user
+    if request.method not in ("GET", "POST"):
+        return json_error("Method not allowed", 405)
+    denied = require(actor, Action.MANAGE_MEMBERS)
+    if denied:
+        return denied
 
     if request.method == "GET":
-        if actor.role not in MINTABLE:
-            return json_error("Admin access required", 403)
         rows = JoinCode.objects.filter(org=org).order_by("-created_at")
         return JsonResponse(
             [
@@ -225,16 +228,9 @@ def join_codes(request):
             safe=False,
         )
 
-    if request.method != "POST":
-        return json_error("Method not allowed", 405)
-
-    allowed = MINTABLE.get(actor.role)
-    if not allowed:
-        return json_error("Admin access required", 403)
-
     body = parse_body(request)
     role = str(body.get("role", User.Role.MEMBER)).strip()
-    if role not in allowed:
+    if role not in MINTABLE.get(actor.role, ()):
         return json_error(f"You cannot create a join code granting {role!r}", 400)
 
     try:
@@ -275,8 +271,9 @@ def join_codes(request):
 def revoke_join_code(request, code):
     if request.method != "DELETE":
         return json_error("Method not allowed", 405)
-    if request.fv_user.role not in MINTABLE:
-        return json_error("Admin access required", 403)
+    denied = require(request.fv_user, Action.MANAGE_MEMBERS)
+    if denied:
+        return denied
     updated = JoinCode.objects.filter(code=code, org=request.fv_org).update(revoked=True)
     if not updated:
         return json_error("Join code not found", 404)
