@@ -6,19 +6,10 @@ from django.db import connections
 from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
 from apps.ledger.models import DatabaseFund, TransactionFund
-from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# See tests/test_member_management.py for why this alias must exist at import
-# time: Django computes each TestCase's database allowlist before setUp runs.
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
 def _request(method, url, body, token, results, errors, before=None):
@@ -38,30 +29,14 @@ def _request(method, url, body, token, results, errors, before=None):
         connections[ORG_ALIAS].close()
 
 
-class BalanceConcurrencyTests(TransactionTestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        # Re-register in case the process-wide connection LRU evicted it.
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class BalanceConcurrencyTests(OrgTestMixin, TransactionTestCase):
     def setUp(self):
         Org.objects.create(
             id="o1", name="Acme", slug="acme",
             owner_email="o@example.com", db_connection=TENANT_URL,
         )
-        self.token = create_session_token("u_owner", "o1")
+        self.token = self.make_user("u_owner", "owner", username="owner", email="o@example.com")
         with org_context(ORG_ALIAS):
-            User.objects.create(
-                id="u_owner", username="owner", email="o@example.com",
-                password_hash="x", role="owner", is_active=True,
-            )
-            Session.objects.create(
-                id="s_owner", user_id="u_owner", token=self.token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
             DatabaseFund.objects.create(id="f1", created_by_id="u_owner", name="Fund", balance=100.0)
             TransactionFund.objects.create(
                 id="t0", database_id="f1", type="credit", amount=100.0,
