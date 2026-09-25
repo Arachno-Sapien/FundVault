@@ -117,7 +117,7 @@ export default function CreateOrgForm({ onCreated, onError }) {
       <label>Password</label>
       <input type="password" value={form.password} onChange={e => set("password", e.target.value)} />
 
-      <button type="button" className="btn-primary" onClick={submit} disabled={busy}>
+      <button type="button" className="btn btn-primary" onClick={submit} disabled={busy}>
         {busy ? "Creating organisation…" : "Create organisation"}
       </button>
       <p className="hint">

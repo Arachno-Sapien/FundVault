@@ -227,7 +227,15 @@ export default function FundVaultApp() {
       const canvas = document.createElement("canvas");
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
-      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      if (!canvas.width || !canvas.height) {
+        URL.revokeObjectURL(url);
+        toast("That file is not a readable image", "error");
+        return;
+      }
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#fff"; // JPEG has no alpha: a transparent PNG would come out black
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       URL.revokeObjectURL(url);
       setProfileForm(prev => ({ ...prev, profileImage: canvas.toDataURL("image/jpeg", 0.85) }));
     };

@@ -71,7 +71,7 @@ export default function OrgGateway({ onAuthenticated, onError }) {
             }}
           />
           {!orgs && (
-            <button type="button" className="btn-primary" onClick={findOrgs}>
+            <button type="button" className="btn btn-primary" onClick={findOrgs}>
               Continue
             </button>
           )}
@@ -116,7 +116,7 @@ export default function OrgGateway({ onAuthenticated, onError }) {
                 onChange={e => setCredentials(prev => ({ ...prev, password: e.target.value }))}
                 onKeyDown={e => e.key === "Enter" && signIn()}
               />
-              <button type="button" className="btn-primary" onClick={signIn}>
+              <button type="button" className="btn btn-primary" onClick={signIn}>
                 Sign in
               </button>
             </>

@@ -1,4 +1,4 @@
-import { fmt, formatDateShort, relativeTime } from "lib/format";
+import { fmt, formatDateShort } from "lib/format";
 
 export default function HomeView({
   databases,

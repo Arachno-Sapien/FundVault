@@ -80,7 +80,7 @@ export default function JoinOrgForm({ onJoined, onError }) {
             onChange={e => set("password", e.target.value)}
           />
 
-          <button type="button" className="btn-primary" onClick={submit} disabled={busy}>
+          <button type="button" className="btn btn-primary" onClick={submit} disabled={busy}>
             {busy ? "Joining…" : `Join ${preview.org.name}`}
           </button>
         </>
