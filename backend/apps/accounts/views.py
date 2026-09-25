@@ -1,5 +1,6 @@
 import bcrypt
 from django.db import IntegrityError, transaction
+from django.db.models import Count, Q
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -176,18 +177,23 @@ def admin_users(request):
     if request.method != "GET":
         return json_error("Method not allowed", 405)
 
-    users = list(User.objects.all().order_by("created_at"))
+    funds = {
+        row["created_by_id"]: row
+        for row in DatabaseFund.objects.values("created_by_id").annotate(
+            total=Count("id"), active=Count("id", filter=Q(is_deleted=False))
+        )
+    }
+    txns = dict(TransactionFund.objects.values_list("created_by_id").annotate(Count("id")))
     data = []
-    for user in users:
-        db_count = DatabaseFund.objects.filter(created_by_id=user.id).count()
-        active_db_count = DatabaseFund.objects.filter(created_by_id=user.id, is_deleted=False).count()
-        tx_count = TransactionFund.objects.filter(created_by_id=user.id).count()
+    for user in User.objects.all().order_by("created_at"):
+        fund = funds.get(user.id, {})
         row = serialize_user(user)
-        row["database_count"] = db_count
-        row["active_database_count"] = active_db_count
-        row["transaction_count"] = tx_count
+        row["database_count"] = fund.get("total", 0)
+        row["active_database_count"] = fund.get("active", 0)
+        row["transaction_count"] = txns.get(user.id, 0)
         data.append(row)
-    data.sort(key=lambda x: (0 if x["role"] == "admin" else 1, x["created_at"] or ""))
+    rank = {User.Role.OWNER: 0, User.Role.ADMIN: 1, User.Role.MEMBER: 2, User.Role.VIEWER: 3}
+    data.sort(key=lambda x: (rank.get(x["role"], 4), x["created_at"] or ""))
     return JsonResponse(data, safe=False)
 
 

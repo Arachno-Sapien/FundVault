@@ -1,11 +1,14 @@
 import json
 from datetime import timedelta
 
+from django.db import connections
 from django.test import Client, TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.accounts.models import Session, User
 from apps.common.auth import create_session_token
+from apps.ledger.models import DatabaseFund, TransactionFund
 from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import EmailIndex, Org
@@ -200,6 +203,37 @@ class MemberManagementTests(TestCase):
                 "/api/admin/users", HTTP_AUTHORIZATION=f"Bearer {token}"
             )
             self.assertEqual(response.status_code, 200)
+
+    def test_member_list_counts_in_a_fixed_number_of_queries(self):
+        with org_context(ORG_ALIAS):
+            for n in range(17):
+                User.objects.create(
+                    id=f"u_{n}", username=f"u_{n}", email=f"u_{n}@example.com",
+                    password_hash="x", role="member", is_active=True,
+                )
+            DatabaseFund.objects.create(id="f1", name="Live", created_by_id="u_admin")
+            DatabaseFund.objects.create(id="f2", name="Gone", created_by_id="u_admin", is_deleted=True)
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=5, date=timezone.now(),
+                mode="cash", running_balance=5, created_by_id="u_member",
+            )
+        with CaptureQueriesContext(connections[ORG_ALIAS]) as tenant:
+            response = self.client.get("/api/admin/users", HTTP_AUTHORIZATION=f"Bearer {self.owner}")
+        self.assertEqual(response.status_code, 200)
+        ordered = json.loads(response.content)
+        rows = {row["id"]: row for row in ordered}
+        self.assertEqual(len(rows), 20)
+        self.assertEqual(ordered[0]["role"], "owner")
+
+        def counts(user_id):
+            keys = ("database_count", "active_database_count", "transaction_count")
+            return tuple(rows[user_id][key] for key in keys)
+
+        self.assertEqual(counts("u_admin"), (2, 1, 0))
+        self.assertEqual(counts("u_member"), (0, 0, 1))
+        self.assertEqual(counts("u_3"), (0, 0, 0))
+        # Session lookup, users, fund counts, transaction counts: not 3 per user.
+        self.assertLessEqual(len(tenant.captured_queries), 5)
 
     def test_password_reset_requires_manage_members(self):
         self.assertEqual(self._reset_password(self.member, "u_admin").status_code, 403)
