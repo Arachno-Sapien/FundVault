@@ -125,6 +125,7 @@ class BalanceConcurrencyTests(TransactionTestCase):
         for t in threads:
             t.join(timeout=15)
 
+        self.assertTrue(void_has_read.is_set(), "the void never reached its balance write")
         self.assertEqual(errors, [], f"threads raised: {errors}")
         self.assertEqual([r.status_code for r in results], [200, 200])
         self.assertEqual(self._fund_balance(), 5.0, "the void overwrote the concurrent credit")

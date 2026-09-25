@@ -31,6 +31,11 @@ from apps.orgs.context import current_org_alias
 
 logger = logging.getLogger(__name__)
 
+# Two finite credits can still add up past a float's max and leave a fund's
+# balance (and the org's JSON) as Infinity. Above ~9e13, 2-decimal rounding
+# stops being exact in a float anyway, so this is nowhere near a real ledger.
+MAX_AMOUNT = 1e12
+
 
 def _parse_iso_datetime(raw):
     if not raw:
@@ -314,7 +319,7 @@ def database_transactions(request, database_id):
         return json_error("Invalid transaction type", 400)
     if mode not in ("electronic", "cheque", "cash"):
         return json_error("Invalid transaction mode", 400)
-    if amount <= 0:
+    if amount <= 0 or amount > MAX_AMOUNT:
         return json_error("Amount must be greater than 0", 400)
     if tx_date is None:
         return json_error("Transaction date is required", 400)
@@ -531,7 +536,7 @@ def transaction_update(request, transaction_id):
         return json_error("Cannot edit a voided transaction", 400)
 
     amount = round(parse_number(body["amount"]) or 0, 2) if "amount" in body else txn.amount
-    if amount <= 0:
+    if amount <= 0 or amount > MAX_AMOUNT:
         return json_error("Enter a valid amount", 400)
     tx_date = txn.date
     if "date" in body:
@@ -710,7 +715,7 @@ def recurring_list_create(request, database_id):
 
     if tx_type not in ("credit", "debit"):
         return json_error("Invalid transaction type", 400)
-    if amount <= 0:
+    if amount <= 0 or amount > MAX_AMOUNT:
         return json_error("Amount must be greater than 0", 400)
     if frequency not in ("daily", "weekly", "monthly", "yearly"):
         return json_error("Invalid frequency", 400)

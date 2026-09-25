@@ -90,6 +90,14 @@ class LedgerMoneyTests(TestCase):
             self.assertEqual(TransactionFund.objects.get(id="t1").amount, 10.0)
             self.assertFalse(RecurringTransaction.objects.exists())
 
+    def test_amount_above_the_cap_is_400(self):
+        # Two finite credits this large would add past a float's max and turn
+        # the fund's balance (and the org's JSON) into Infinity.
+        with self.subTest(amount=1e308):
+            response = self._post_txn("credit", 1e308)
+            self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(self._fund().balance, 0.0)
+
     def test_json_array_body_is_400(self):
         self.assertEqual(self._send("post", "/api/databases/f1/transactions", "[1, 2]").status_code, 400)
         self.assertEqual(self._send("post", "/api/databases", "[]").status_code, 400)
