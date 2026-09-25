@@ -356,6 +356,12 @@ def database_transactions(request, database_id):
         fund = lock_fund(database_id)
         if not fund:
             return json_error("Database not found", 404)
+        # Re-check under the lock: the pre-lock check above is only a fast path.
+        # A merge or archive toggle can commit while this POST waits on the lock,
+        # which would otherwise post into a fund that is now archived (orphaned
+        # money, see process_due_recurring's matching re-check in services.py).
+        if fund.is_archived:
+            return json_error("This fund is archived", 400)
         requires_approval = needs_approval(request.fv_user, amount, fund.approval_threshold)
         try:
             txn = post_transaction(

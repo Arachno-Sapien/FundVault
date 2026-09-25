@@ -222,6 +222,40 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
             self.assertEqual(RecurringTransaction.objects.get(id="r1").next_run, timezone.now().date())
             self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1000.0)
 
+    def test_process_due_recurring_skips_a_fund_archived_while_waiting_on_the_lock(self):
+        # due_ids is read without a lock. If a merge or archive toggle commits
+        # while a due rule is waiting on lock_fund(), the fund is archived by
+        # the time the lock is granted, and without a re-check under the lock
+        # the rule would still post into it -- the same orphan the archived
+        # guard in database_transactions closes for manual posts.
+        import apps.ledger.services as ledger_services
+
+        real_lock_fund = ledger_services.lock_fund
+
+        def archive_then_lock(database_id):
+            fund = real_lock_fund(database_id)
+            DatabaseFund.objects.filter(id=database_id).update(is_archived=True)
+            fund.is_archived = True
+            return fund
+
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="f1", name="Fund", balance=1000.0, created_by_id="u_owner")
+            RecurringTransaction.objects.create(
+                id="r1", database_id="f1", type="credit", amount=50.0,
+                frequency="monthly", description="rent",
+                next_run=timezone.now().date(), is_active=True,
+                created_by_id="u_owner",
+            )
+            owner = User.objects.get(id="u_owner")
+            with mock.patch("apps.ledger.services.lock_fund", side_effect=archive_then_lock):
+                created = process_due_recurring(owner)
+        self.assertEqual(created, [])
+        with org_context(ORG_ALIAS):
+            # Left due, not silently advanced, matching the pre-archived case.
+            self.assertEqual(RecurringTransaction.objects.get(id="r1").next_run, timezone.now().date())
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1000.0)
+            self.assertEqual(TransactionFund.objects.filter(database_id="f1").count(), 0)
+
     def test_merge_response_carries_the_real_balance(self):
         # databases_merge builds its response from the in-memory `merged`
         # object; recalculate_running_balances writes the real balance with a

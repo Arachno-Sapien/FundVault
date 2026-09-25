@@ -135,6 +135,13 @@ def process_due_recurring(user):
             if rec is None:
                 continue
             db = lock_fund(rec.database_id)
+            # Re-check under the lock: the due_ids query above filtered on an
+            # unlocked read, so an archive or delete that commits while this
+            # rule waits on the lock would otherwise post into a fund that is
+            # no longer live. Skip without advancing next_run so a later
+            # unarchive picks the rule back up from where it left off.
+            if db is None or db.is_archived or db.is_deleted:
+                continue
             # Re-evaluated against the creator's *current* standing every run
             # (not frozen at creation time). Fail closed: only a creator who
             # still exists, is active, and could still create this rule

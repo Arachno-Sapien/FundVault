@@ -212,4 +212,26 @@ class LedgerMoneyTests(OrgTestMixin, TestCase):
         response = self._post_txn("credit", 10)
         self.assertEqual(response.status_code, 400, response.content)
         self.assertEqual(response.json()["error"], "This fund is archived")
+
+    def test_cannot_post_a_transaction_that_is_archived_while_waiting_on_the_lock(self):
+        # The pre-lock is_archived check above is only a fast path. If a merge
+        # (or an archive toggle) commits while this POST is waiting on
+        # lock_fund(), the fund is archived by the time the lock is granted.
+        # Without a re-check under the lock, the post lands in a fund that is
+        # now archived -- exactly the orphan the merge lock was meant to close.
+        real_lock_fund = ledger_views.lock_fund
+
+        def archive_then_lock(database_id):
+            fund = real_lock_fund(database_id)
+            DatabaseFund.objects.filter(id=database_id).update(is_archived=True)
+            fund.is_archived = True
+            return fund
+
+        with mock.patch("apps.ledger.views.lock_fund", side_effect=archive_then_lock):
+            response = self._post_txn("credit", 10)
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "This fund is archived")
+        with org_context(ORG_ALIAS):
+            self.assertEqual(TransactionFund.objects.filter(database_id="f1").count(), 0)
         self.assertEqual(self._fund().balance, 0.0)
