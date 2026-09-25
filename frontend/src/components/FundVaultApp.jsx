@@ -223,15 +223,19 @@ export default function FundVaultApp() {
     const url = URL.createObjectURL(file);
     const img = new window.Image();
     img.onload = () => {
-      const scale = Math.min(1, 256 / Math.max(img.width, img.height));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      if (!canvas.width || !canvas.height) {
+      // An SVG with no intrinsic size loads with width/height 0 -- that's the
+      // "not readable" case. A real image with an extreme aspect ratio (e.g.
+      // 4000x5) is readable but would round its short side down to 0 at this
+      // scale; clamp each dimension to at least 1px instead of rejecting it.
+      if (!img.width || !img.height) {
         URL.revokeObjectURL(url);
         toast("That file is not a readable image", "error");
         return;
       }
+      const scale = Math.min(1, 256 / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
       const ctx = canvas.getContext("2d");
       ctx.fillStyle = "#fff"; // JPEG has no alpha: a transparent PNG would come out black
       ctx.fillRect(0, 0, canvas.width, canvas.height);
