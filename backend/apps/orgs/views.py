@@ -212,7 +212,8 @@ def join_codes(request):
         return denied
 
     if request.method == "GET":
-        rows = JoinCode.objects.filter(org=org).order_by("-created_at")
+        mintable = MINTABLE.get(actor.role, ())
+        rows = JoinCode.objects.filter(org=org, grants_role__in=mintable).order_by("-created_at")
         return JsonResponse(
             [
                 {
@@ -274,8 +275,14 @@ def revoke_join_code(request, code):
     denied = require(request.fv_user, Action.MANAGE_MEMBERS)
     if denied:
         return denied
-    updated = JoinCode.objects.filter(code=code, org=request.fv_org).update(revoked=True)
+    mintable = MINTABLE.get(request.fv_user.role, ())
+    updated = JoinCode.objects.filter(
+        code=code, org=request.fv_org, grants_role__in=mintable
+    ).update(revoked=True)
     if not updated:
+        # Also true for a code that exists but grants a role the caller could
+        # not mint (e.g. an Admin hitting the Owner's admin-granting code):
+        # answer exactly like a nonexistent one so existence isn't revealed.
         return json_error("Join code not found", 404)
     add_audit(request.fv_user.id, "delete", "join_code", None, "Join code revoked")
     return JsonResponse({"success": True})

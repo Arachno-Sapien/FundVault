@@ -244,3 +244,43 @@ class CodeManagementTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(JoinCode.objects.get(code=code).revoked)
+
+    def _codes(self, token):
+        return self.client.get(
+            "/api/orgs/codes", HTTP_AUTHORIZATION=f"Bearer {token}"
+        )
+
+    def test_admin_code_is_hidden_from_an_admins_list_but_visible_to_the_owner(self):
+        admin_code = json.loads(self._mint(self.owner_token, "admin").content)["code"]
+        admin_codes = [row["code"] for row in json.loads(self._codes(self.admin_token).content)]
+        owner_codes = [row["code"] for row in json.loads(self._codes(self.owner_token).content)]
+        self.assertNotIn(admin_code, admin_codes)
+        self.assertIn(admin_code, owner_codes)
+
+    def test_admin_cannot_revoke_an_admin_code(self):
+        admin_code = json.loads(self._mint(self.owner_token, "admin").content)["code"]
+        response = self.client.delete(
+            f"/api/orgs/codes/{admin_code}", HTTP_AUTHORIZATION=f"Bearer {self.admin_token}"
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(JoinCode.objects.get(code=admin_code).revoked)
+
+    def test_admin_can_still_list_and_revoke_member_and_viewer_codes(self):
+        member_code = json.loads(self._mint(self.owner_token, "member").content)["code"]
+        viewer_code = json.loads(self._mint(self.owner_token, "viewer").content)["code"]
+        admin_codes = [row["code"] for row in json.loads(self._codes(self.admin_token).content)]
+        self.assertIn(member_code, admin_codes)
+        self.assertIn(viewer_code, admin_codes)
+
+        auth = {"HTTP_AUTHORIZATION": f"Bearer {self.admin_token}"}
+        response = self.client.delete(f"/api/orgs/codes/{member_code}", **auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(JoinCode.objects.get(code=member_code).revoked)
+
+    def test_owner_can_revoke_the_admin_code(self):
+        admin_code = json.loads(self._mint(self.owner_token, "admin").content)["code"]
+        response = self.client.delete(
+            f"/api/orgs/codes/{admin_code}", HTTP_AUTHORIZATION=f"Bearer {self.owner_token}"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(JoinCode.objects.get(code=admin_code).revoked)
