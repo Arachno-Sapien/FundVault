@@ -871,7 +871,10 @@ Toggles the archived flag.
 **POST** `/databases/merge`
 
 Creates a new database containing both source databases' transactions,
-archives the sources, and recalculates running balances.
+archives the sources, and recalculates running balances. Both funds are
+locked (in sorted-id order) before their transactions are read, so a
+transaction posted to either one during the merge can never be left behind,
+orphaned, in a fund the merge is about to archive.
 
 **Request Body:**
 
@@ -1017,12 +1020,13 @@ receipt, then a receipt is attached separately with
   transactions pending approval it does not, until
   [approved](#5-approve-a-transaction).
 - A debit cannot take the balance negative.
+- An archived fund refuses every new transaction.
 
 **Error Responses:**
 
 - `400`: Invalid transaction type / Invalid transaction mode / Amount must be
   greater than 0 / Amount must be at most ₹1,000,000,000,000 / Transaction
-  date is required / Insufficient balance
+  date is required / Insufficient balance / This fund is archived
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Database not found
@@ -1098,7 +1102,11 @@ endpoint above).
 Only valid for a transaction with `requires_approval: true` and
 `approved: false`. The approver's own transaction may be approved — the
 compensating control for that is the audit trail (`created_by` and
-`approved_by` are both recorded), not a block.
+`approved_by` are both recorded), not a block. All of these checks —
+voided, already-approved, requires-approval, and the balance check for a
+debit — are re-run against the transaction's current row under its own lock,
+taken after the fund's, so an edit to its amount racing with the approval can
+never be approved against a stale copy.
 
 **Response (200):**
 
@@ -1339,7 +1347,8 @@ Creates a real transaction for every active recurring transaction whose
 `next_run` has passed, and advances `next_run`. Overlapping calls (the
 frontend fires this on every app load) never post the same due rule twice —
 the second caller locks after the first and sees its already-advanced
-`next_run`.
+`next_run`. A rule on an archived fund is skipped entirely — not advanced,
+not posted — so it runs normally as soon as the fund is unarchived.
 
 A created transaction is posted straight through only if the rule's creator
 is still an active Admin or Owner; otherwise it is gated exactly as if a
@@ -1511,9 +1520,9 @@ Totals across every non-deleted fund in the organisation.
 ```json
 {
   "totalDatabases": "integer",
-  "totalBalance": "float (sum of all non-deleted funds' balances)",
-  "totalCredits": "float (sum of all non-voided credit transactions)",
-  "totalDebits": "float (sum of all non-voided debit transactions)"
+  "totalBalance": "float, rounded to 2dp (sum of all non-deleted funds' balances)",
+  "totalCredits": "float, rounded to 2dp (sum of all non-voided credit transactions)",
+  "totalDebits": "float, rounded to 2dp (sum of all non-voided debit transactions)"
 }
 ```
 
