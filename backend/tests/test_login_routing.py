@@ -10,21 +10,9 @@ from django.utils import timezone
 
 from apps.accounts.models import Session, User
 from apps.common.auth import create_session_token
-from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import EmailIndex, Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# The middleware resolves org "o1" to this alias at request time (see
-# apps.orgs.connections.alias_for_org), not to the static "tenant_dev" alias —
-# each org gets its own dynamically-registered connection, even when (as in
-# dev/tests) it happens to point at the same physical database. Django computes
-# its per-test database allowlist once, before any test's setUp runs, so the
-# alias must already be real by then, not just a name in `databases` (see
-# tests.test_org_middleware for the same pattern).
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
 class OrgDiscoveryTests(TestCase):
@@ -90,19 +78,7 @@ class OrgDiscoveryTests(TestCase):
         self.assertNotIn("devpassword", text)
 
 
-class LoginTests(TestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        # Re-register immediately before Django validates this class's
-        # `databases` against the live registry: the connection registry's LRU
-        # is shared with other test modules (e.g. test_org_connections.py's
-        # eviction test), which can push ORG_ALIAS out between module import
-        # and here.
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class LoginTests(OrgTestMixin, TestCase):
     def setUp(self):
         # login is rate limited per IP on Django's cache, and LocMemCache is one
         # dict for the whole test run — without this, the burst test below would
