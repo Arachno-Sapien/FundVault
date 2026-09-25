@@ -3,10 +3,13 @@ from datetime import timedelta
 
 import bcrypt
 from django.core.cache import cache
+from django.db import connections
 from django.test import Client, TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from apps.accounts.models import User
+from apps.accounts.models import Session, User
+from apps.common.auth import create_session_token
 from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import EmailIndex, Org
@@ -167,3 +170,33 @@ class LoginTests(TestCase):
             content_type="application/json",
         )
         self.assertIn(response.status_code, (404, 405))
+
+    # --- sessions: expiry is checked per request, cleanup happens at login ---
+
+    def _session(self, session_id, expires_in):
+        token = create_session_token("u1", "o1")
+        with org_context(ORG_ALIAS):
+            Session.objects.create(
+                id=session_id, user_id="u1", token=token,
+                expires_at=timezone.now() + expires_in,
+            )
+        return token
+
+    def test_an_expired_session_is_refused(self):
+        # The JWT is good for another 24h; only the session row has expired.
+        token = self._session("s_old", timedelta(seconds=-1))
+        response = self.client.get("/api/auth/me", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(response.status_code, 401)
+
+    def test_login_clears_expired_sessions(self):
+        self._session("s_old", timedelta(seconds=-1))
+        self.assertEqual(self._login().status_code, 200)
+        with org_context(ORG_ALIAS):
+            self.assertFalse(Session.objects.filter(id="s_old").exists())
+
+    def test_an_authenticated_read_does_not_write(self):
+        token = self._session("s_live", timedelta(hours=1))
+        with CaptureQueriesContext(connections[ORG_ALIAS]) as tenant:
+            response = self.client.get("/api/auth/me", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([q["sql"].split()[0] for q in tenant.captured_queries], ["SELECT"])

@@ -28,6 +28,8 @@ def create_session_token(user_id, org_id):
 
 
 def create_session(user_id, token):
+    # Housekeeping only: an expired row is already refused per request below.
+    _clean_expired_sessions()
     expires_at = timezone.now() + timedelta(hours=settings.FUNDVAULT_SESSION_HOURS)
     session = Session(id=uid(), user_id=user_id, token=token, expires_at=expires_at)
     session.save(force_insert=True)
@@ -46,14 +48,6 @@ def auth_required(view_func):
             decoded = jwt.decode(token, settings.FUNDVAULT_JWT_SECRET, algorithms=["HS256"])
         except jwt.PyJWTError:
             return json_error("Invalid token", 401)
-
-        # Deferred until the token decodes: it queries the tenant database,
-        # which requires an organisation in context. OrgContextMiddleware only
-        # sets that context for a token it could itself decode (see
-        # apps.orgs.middleware._resolve_org) — an expired/malformed/invalid
-        # token leaves no org in context, so calling this any earlier raises
-        # apps.orgs.router.NoOrgContext instead of the 401 above.
-        _clean_expired_sessions()
 
         session = (
             Session.objects.select_related("user")
@@ -75,9 +69,6 @@ def auth_required(view_func):
         if not user.is_active:
             Session.objects.filter(user_id=user.id).delete()
             return json_error("Account is inactive", 403)
-
-        session.last_activity = timezone.now()
-        session.save(update_fields=["last_activity"])
 
         request.fv_user = user
         request.fv_token = token

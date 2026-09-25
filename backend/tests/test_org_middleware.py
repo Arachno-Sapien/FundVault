@@ -140,7 +140,7 @@ class MiddlewareTests(TransactionTestCase):
         # A header is present but doesn't decode (garbage/expired/malformed).
         # OrgContextMiddleware._resolve_org returns None for this by design —
         # no org context is ever set — so auth_required must not touch the
-        # tenant database (_clean_expired_sessions) before it has confirmed
+        # tenant database (the session lookup) before it has confirmed
         # the token decodes, or it crashes with NoOrgContext instead of 401.
         response = self.client.get(
             "/api/databases", HTTP_AUTHORIZATION="Bearer not-a-real-jwt"
