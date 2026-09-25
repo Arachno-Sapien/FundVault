@@ -43,6 +43,18 @@ logger = logging.getLogger(__name__)
 MAX_AMOUNT = 1e12
 
 
+def _amount_error(amount):
+    """Shared amount validation for create, update and recurring create.
+
+    Returns a 400 JsonResponse if the amount is invalid, or None if it's fine.
+    """
+    if amount <= 0:
+        return json_error("Amount must be greater than 0", 400)
+    if amount > MAX_AMOUNT:
+        return json_error(f"Amount must be at most ₹{MAX_AMOUNT:,.0f}", 400)
+    return None
+
+
 def _parse_iso_datetime(raw):
     if not raw:
         return None
@@ -195,7 +207,10 @@ def databases_merge(request):
         source.save(update_fields=["is_archived"])
         target.save(update_fields=["is_archived"])
 
-        recalculate_running_balances(merged.id)
+        # recalculate_running_balances writes the real balance via a queryset
+        # .update(), which never touches this in-memory `merged` object -- use
+        # its return value so the response doesn't report the stale 0 balance.
+        merged.balance = recalculate_running_balances(merged.id)
         add_audit(
             request.fv_user.id,
             "create",
@@ -320,8 +335,9 @@ def database_transactions(request, database_id):
         return json_error("Invalid transaction type", 400)
     if mode not in ("electronic", "cheque", "cash"):
         return json_error("Invalid transaction mode", 400)
-    if amount <= 0 or amount > MAX_AMOUNT:
-        return json_error("Amount must be greater than 0", 400)
+    amount_error = _amount_error(amount)
+    if amount_error:
+        return amount_error
     if tx_date is None:
         return json_error("Transaction date is required", 400)
     # The org's own alias: select_for_update() needs a transaction on the alias it queries.
@@ -509,8 +525,9 @@ def transaction_update(request, transaction_id):
         return json_error("Cannot edit a voided transaction", 400)
 
     amount = round(parse_number(body["amount"]) or 0, 2) if "amount" in body else txn.amount
-    if amount <= 0 or amount > MAX_AMOUNT:
-        return json_error("Enter a valid amount", 400)
+    amount_error = _amount_error(amount)
+    if amount_error:
+        return amount_error
     tx_date = txn.date
     if "date" in body:
         parsed_date = _parse_iso_datetime(body.get("date"))
@@ -664,8 +681,9 @@ def recurring_list_create(request, database_id):
 
     if tx_type not in ("credit", "debit"):
         return json_error("Invalid transaction type", 400)
-    if amount <= 0 or amount > MAX_AMOUNT:
-        return json_error("Amount must be greater than 0", 400)
+    amount_error = _amount_error(amount)
+    if amount_error:
+        return amount_error
     if frequency not in ("daily", "weekly", "monthly", "yearly"):
         return json_error("Invalid frequency", 400)
     if not description:

@@ -98,6 +98,40 @@ class LedgerMoneyTests(TestCase):
             self.assertEqual(response.status_code, 400, response.content)
         self.assertEqual(self._fund().balance, 0.0)
 
+    def test_amount_above_the_cap_has_its_own_message(self):
+        # A user who typed 2e12 gets told about the cap, not "greater than 0".
+        response = self._post_txn("credit", 2e12)
+        self.assertEqual(response.status_code, 400, response.content)
+        message = response.json()["error"]
+        self.assertIn("₹", message)
+        self.assertIn("1,000,000,000,000", message)
+        self.assertNotEqual(message, "Amount must be greater than 0")
+
+    def test_update_refuses_an_over_cap_amount(self):
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=10.0,
+                date=timezone.now(), mode="cash", running_balance=10.0,
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=10.0)
+        response = self._send("put", "/api/transactions/t1", {"amount": 2e12})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("₹", response.json()["error"])
+        with org_context(ORG_ALIAS):
+            self.assertEqual(TransactionFund.objects.get(id="t1").amount, 10.0)
+        self.assertEqual(self._fund().balance, 10.0)
+
+    def test_recurring_create_refuses_an_over_cap_amount(self):
+        response = self._send("post", "/api/databases/f1/recurring", {
+            "type": "credit", "amount": 2e12, "frequency": "monthly",
+            "description": "rent", "nextRun": "2030-01-01",
+        })
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("₹", response.json()["error"])
+        with org_context(ORG_ALIAS):
+            self.assertFalse(RecurringTransaction.objects.exists())
+        self.assertEqual(self._fund().balance, 0.0)
+
     def test_json_array_body_is_400(self):
         self.assertEqual(self._send("post", "/api/databases/f1/transactions", "[1, 2]").status_code, 400)
         self.assertEqual(self._send("post", "/api/databases", "[]").status_code, 400)

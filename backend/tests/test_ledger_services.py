@@ -172,3 +172,33 @@ class LedgerServicesTests(TestCase):
         self.assertFalse(created[0].approved)
         with org_context(ORG_ALIAS):
             self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 1000.0)
+
+    def test_merge_response_carries_the_real_balance(self):
+        # databases_merge builds its response from the in-memory `merged`
+        # object; recalculate_running_balances writes the real balance with a
+        # queryset .update(), which that object never sees on its own.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="src", name="Source", created_by_id="u_owner")
+            DatabaseFund.objects.create(id="tgt", name="Target", created_by_id="u_owner")
+            now = timezone.now()
+            TransactionFund.objects.create(
+                id="ts1", database_id="src", type="credit", amount=100.0,
+                date=now, mode="cash", running_balance=100.0,
+                approved=True, requires_approval=False,
+            )
+            TransactionFund.objects.create(
+                id="tt1", database_id="tgt", type="credit", amount=50.0,
+                date=now, mode="cash", running_balance=50.0,
+                approved=True, requires_approval=False,
+            )
+        response = self.client.post(
+            "/api/databases/merge",
+            data=json.dumps({"sourceId": "src", "targetId": "tgt", "name": "Merged"}),
+            content_type="application/json", **self.owner_auth,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertEqual(body["balance"], 150.0)
+        with org_context(ORG_ALIAS):
+            merged_id = body["id"]
+            self.assertEqual(DatabaseFund.objects.get(id=merged_id).balance, 150.0)
