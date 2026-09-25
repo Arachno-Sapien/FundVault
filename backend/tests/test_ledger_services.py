@@ -11,51 +11,23 @@ from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
+from apps.accounts.models import User
 from apps.ledger.models import DatabaseFund, RecurringTransaction, TransactionFund
 from apps.ledger.services import process_due_recurring
-from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# See tests/test_ledger_permissions.py for why this alias must exist at import
-# time: Django computes each TestCase's database allowlist before setUp runs.
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
-class LedgerServicesTests(TestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class LedgerServicesTests(OrgTestMixin, TestCase):
     def setUp(self):
         self.client = Client()
         Org.objects.create(
             id="o1", name="Acme", slug="acme",
             owner_email="o@example.com", db_connection=TENANT_URL,
         )
-        self.owner_token = self._user("u_owner", "owner")
+        self.owner_token = self.make_user("u_owner", "owner")
         self.owner_auth = {"HTTP_AUTHORIZATION": f"Bearer {self.owner_token}"}
-
-    def _user(self, user_id, role):
-        token = create_session_token(user_id, "o1")
-        with org_context(ORG_ALIAS):
-            User.objects.create(
-                id=user_id, username=user_id, email=f"{user_id}@example.com",
-                password_hash="x", role=role, is_active=True,
-            )
-            Session.objects.create(
-                id=f"s_{user_id}", user_id=user_id, token=token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
-        return token
 
     def test_overview_counts_in_two_queries(self):
         with org_context(ORG_ALIAS):
@@ -137,7 +109,7 @@ class LedgerServicesTests(TestCase):
                 date=timezone.now() - timedelta(days=365), mode="cash",
                 running_balance=1000.0, approved=True, created_by_id="u_owner",
             )
-        member_token = self._user("u_member", "member")
+        member_token = self.make_user("u_member", "member")
 
         # A Member's manual transaction at or above the threshold awaits approval.
         response = self.client.post(
@@ -156,7 +128,7 @@ class LedgerServicesTests(TestCase):
 
         # A recurring rule created by an Admin, who is later demoted to
         # Member, is gated exactly as a Member's manual transaction would be.
-        self._user("u_admin", "admin")
+        self.make_user("u_admin", "admin")
         with org_context(ORG_ALIAS):
             RecurringTransaction.objects.create(
                 id="r1", database_id="f1", type="credit", amount=600.0,
