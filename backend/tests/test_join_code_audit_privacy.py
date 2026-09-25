@@ -1,28 +1,15 @@
 import json
-from datetime import timedelta
 
 from django.test import Client, TestCase
-from django.utils import timezone
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
+from apps.accounts.models import User
 from apps.ledger.models import AuditLog
-from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
-from apps.orgs.models import JoinCode, Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# Same alias/registration pattern as test_join_codes.py and
-# test_ledger_permissions.py: the middleware resolves org "o1" through
-# apps.orgs.connections.alias_for_org at request time, so the alias must
-# already exist before Django computes this TestCase's per-test database
-# allowlist.
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from apps.orgs.models import Org
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
-class JoinCodeAuditPrivacyTests(TestCase):
+class JoinCodeAuditPrivacyTests(OrgTestMixin, TestCase):
     """A join code must never be recoverable from the audit trail.
 
     audit_list (ledger/views.py) is deliberately org-wide with no per-action
@@ -33,33 +20,13 @@ class JoinCodeAuditPrivacyTests(TestCase):
     /api/orgs/join/preview and /api/orgs/join to self-escalate.
     """
 
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
     def setUp(self):
         self.client = Client()
         self.org = Org.objects.create(
             id="o1", name="Acme", slug="acme",
             owner_email="o@example.com", db_connection=TENANT_URL,
         )
-        self.owner_token = self._user("u_owner", "owner", User.Role.OWNER)
-
-    def _user(self, user_id, username, role):
-        token = create_session_token(user_id, "o1")
-        with org_context(ORG_ALIAS):
-            User.objects.create(
-                id=user_id, username=username, email=f"{username}@example.com",
-                password_hash="x", role=role,
-            )
-            Session.objects.create(
-                id=f"s_{user_id}", user_id=user_id, token=token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
-        return token
+        self.owner_token = self.make_user("u_owner", User.Role.OWNER, username="owner", email="owner@example.com")
 
     def _mint(self, role="admin"):
         return self.client.post(
