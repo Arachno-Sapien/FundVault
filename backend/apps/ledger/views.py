@@ -182,6 +182,15 @@ def databases_merge(request):
     # defaults to "default" and select_for_update() elsewhere in this file
     # would raise TransactionManagementError against the org's own connection.
     with transaction.atomic(using=current_org_alias()):
+        # Lock both funds, in sorted-id order (so two concurrent merges can
+        # never deadlock each other), before reading their transactions.
+        # Otherwise a transaction posted to either fund in the window between
+        # that read and archiving them below commits into the fund's rows but
+        # never makes it into the copy already taken -- left behind, orphaned,
+        # in a fund that is now archived and (per database_transactions) can
+        # never take another write.
+        for fund_id in sorted([source_id, target_id]):
+            lock_fund(fund_id)
         merged = DatabaseFund.objects.create(
             id=uid(),
             created_by_id=request.fv_user.id,
@@ -317,6 +326,8 @@ def database_transactions(request, database_id):
     denied = require(request.fv_user, Action.CREATE_TXN)
     if denied:
         return denied
+    if db.is_archived:
+        return json_error("This fund is archived", 400)
 
     body = parse_body(request)
     tx_type = str(body.get("type", "")).strip()
@@ -485,6 +496,23 @@ def transaction_approve(request, transaction_id):
         if not locked:
             return json_error("Database not found", 404)
 
+        # txn was read above without a lock, before the fund was locked. An
+        # Admin's PUT editing this pending debit's amount in that window would
+        # otherwise pass the balance check below against the stale (smaller)
+        # amount, while recalculate_running_balances rebuilds from whatever is
+        # actually in the row now -- driving the fund negative. Re-read it
+        # under its own row lock (fund first, then transaction, same order as
+        # every other money write) and re-run every check against that fresh
+        # copy.
+        txn = TransactionFund.objects.select_for_update().filter(id=transaction_id).first()
+        if not txn:
+            return json_error("Transaction not found", 404)
+        if txn.is_voided:
+            return json_error("Cannot approve a voided transaction", 400)
+        if txn.approved:
+            return json_error("Transaction is already approved", 400)
+        if not txn.requires_approval:
+            return json_error("Transaction does not require approval", 400)
         if txn.type == "debit" and txn.amount > locked.balance:
             return json_error("Insufficient balance to approve this debit transaction", 400)
 
@@ -572,9 +600,9 @@ def analytics_overview(request):
     return JsonResponse(
         {
             "totalDatabases": funds["count"],
-            "totalBalance": funds["balance"] or 0,
-            "totalCredits": totals["credits"] or 0,
-            "totalDebits": totals["debits"] or 0,
+            "totalBalance": round(funds["balance"] or 0, 2),
+            "totalCredits": round(totals["credits"] or 0, 2),
+            "totalDebits": round(totals["debits"] or 0, 2),
         }
     )
 

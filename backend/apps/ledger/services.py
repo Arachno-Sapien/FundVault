@@ -113,7 +113,10 @@ def process_due_recurring(user):
         today = timezone.now().date()
         due_ids = list(
             RecurringTransaction.objects
-            .filter(database__is_deleted=False, is_active=True, next_run__lte=today)
+            .filter(
+                database__is_deleted=False, database__is_archived=False,
+                is_active=True, next_run__lte=today,
+            )
             .order_by("next_run", "created_at")
             .values_list("id", flat=True)
         )
