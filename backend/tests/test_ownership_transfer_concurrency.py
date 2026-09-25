@@ -5,18 +5,10 @@ from django.db import connections
 from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
-from apps.orgs.connections import alias_for_org, ensure_connection
+from apps.accounts.models import User
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# See tests/test_member_management.py for why this alias must exist at import
-# time: Django computes each TestCase's database allowlist before setUp runs.
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
 def _transfer_ownership(token, target_id, barrier, results, errors):
@@ -42,38 +34,15 @@ def _transfer_ownership(token, target_id, barrier, results, errors):
         connections[ORG_ALIAS].close()
 
 
-class OwnershipTransferConcurrencyTests(TransactionTestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        # Re-register in case an unrelated test's connection churn (the LRU
-        # cap in apps.orgs.connections is process-wide) evicted it between
-        # module import and here.
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class OwnershipTransferConcurrencyTests(OrgTestMixin, TransactionTestCase):
     def setUp(self):
         Org.objects.create(
             id="o1", name="Acme", slug="acme",
             owner_email="o@example.com", db_connection=TENANT_URL,
         )
-        self.owner_token = self._user("u_owner", "owner")
-        self._user("u_target_a", "admin")
-        self._user("u_target_b", "admin")
-
-    def _user(self, user_id, role):
-        token = create_session_token(user_id, "o1")
-        with org_context(ORG_ALIAS):
-            User.objects.create(
-                id=user_id, username=user_id, email=f"{user_id}@example.com",
-                password_hash="x", role=role, is_active=True,
-            )
-            Session.objects.create(
-                id=f"s_{user_id}", user_id=user_id, token=token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
-        return token
+        self.owner_token = self.make_user("u_owner", "owner")
+        self.make_user("u_target_a", "admin")
+        self.make_user("u_target_b", "admin")
 
     def test_two_concurrent_transfers_cannot_both_succeed(self):
         # Same Owner, two different targets, at nearly the same time -- the
