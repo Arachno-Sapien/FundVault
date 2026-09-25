@@ -4,41 +4,14 @@ from datetime import timedelta
 from django.test import Client, TestCase, TransactionTestCase
 from django.utils import timezone
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
-from apps.orgs.connections import alias_for_org, drop_connection, ensure_connection
+from apps.accounts.models import User
+from apps.orgs.connections import drop_connection, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import EmailIndex, JoinCode, Org, new_join_code
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# join_org/join_codes/revoke_join_code all resolve the org's tenant database
-# through apps.orgs.connections.ensure_connection (alias "org_o1"), never
-# through the statically declared "tenant_dev" alias — those are two
-# different Django connections onto the same physical database. A plain
-# TestCase wraps each declared alias in its own uncommitted transaction, so a
-# fixture written via "tenant_dev" would be invisible to a request read via
-# "org_o1" (see test_org_middleware.py / test_tenant_isolation.py for the
-# same reasoning already established in this codebase). Fixtures below use
-# ORG_ALIAS directly so setup and the request-under-test share one
-# connection. Registered at import time, same as test_org_middleware.py's
-# ORG_ALIAS: Django computes each TestCase's per-test database allowlist from
-# whatever aliases already exist right before that class's setUpClass runs.
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
-class JoinFlowTests(TestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        # Re-register in case an unrelated test (e.g. the LRU cap test in
-        # test_org_connections.py) evicted ORG_ALIAS from the shared registry
-        # between module import and now.
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class JoinFlowTests(OrgTestMixin, TestCase):
     def setUp(self):
         self.client = Client()
         self.org = Org.objects.create(
@@ -115,7 +88,7 @@ class JoinFlowTests(TestCase):
         self.assertEqual(self._join().status_code, 400)
 
 
-class InvalidOrgConnectionTests(TransactionTestCase):
+class InvalidOrgConnectionTests(OrgTestMixin, TransactionTestCase):
     # TransactionTestCase, not TestCase: this test drops and re-registers the
     # "org_o1" connection mid-test (see apps.orgs.connections.drop_connection
     # below). TestCase wraps every declared alias in an outer atomic block for
@@ -123,13 +96,6 @@ class InvalidOrgConnectionTests(TransactionTestCase):
     # Django's own rollback bookkeeping. TransactionTestCase doesn't wrap
     # connections in atomics, so closing/reopening one is safe — same
     # reasoning as MiddlewareTests in test_org_middleware.py.
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
     def setUp(self):
         self.client = Client()
         self.org = Org.objects.create(
@@ -168,36 +134,16 @@ class InvalidOrgConnectionTests(TransactionTestCase):
         self.assertNotIn(bogus, body)
 
 
-class CodeManagementTests(TestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class CodeManagementTests(OrgTestMixin, TestCase):
     def setUp(self):
         self.client = Client()
         self.org = Org.objects.create(
             id="o1", name="Acme", slug="acme",
             owner_email="o@example.com", db_connection=TENANT_URL,
         )
-        self.owner_token = self._user("u1", "owner", User.Role.OWNER)
-        self.member_token = self._user("u2", "bob", User.Role.MEMBER)
-        self.admin_token = self._user("u3", "carol", User.Role.ADMIN)
-
-    def _user(self, user_id, username, role):
-        token = create_session_token(user_id, "o1")
-        with org_context(ORG_ALIAS):
-            User.objects.create(
-                id=user_id, username=username, email=f"{username}@example.com",
-                password_hash="x", role=role,
-            )
-            Session.objects.create(
-                id=f"s{user_id}", user_id=user_id, token=token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
-        return token
+        self.owner_token = self.make_user("u1", User.Role.OWNER, username="owner", email="owner@example.com")
+        self.member_token = self.make_user("u2", User.Role.MEMBER, username="bob", email="bob@example.com")
+        self.admin_token = self.make_user("u3", User.Role.ADMIN, username="carol", email="carol@example.com")
 
     def _mint(self, token, role="member"):
         return self.client.post(
