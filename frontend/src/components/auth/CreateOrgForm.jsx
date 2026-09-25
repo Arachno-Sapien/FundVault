@@ -98,7 +98,7 @@ export default function CreateOrgForm({ onCreated, onError }) {
         autoComplete="off"
         spellCheck={false}
       />
-      <button type="button" className="btn-secondary" onClick={runCheck} disabled={checking}>
+      <button type="button" className="btn btn-outline" onClick={runCheck} disabled={checking}>
         {checking ? "Testing…" : "Test connection"}
       </button>
       {checkResult && (

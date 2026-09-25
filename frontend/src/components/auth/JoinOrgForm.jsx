@@ -57,7 +57,7 @@ export default function JoinOrgForm({ onJoined, onError }) {
         autoComplete="off"
         spellCheck={false}
       />
-      <button type="button" className="btn-secondary" onClick={lookup}>
+      <button type="button" className="btn btn-outline" onClick={lookup}>
         Look up
       </button>
 

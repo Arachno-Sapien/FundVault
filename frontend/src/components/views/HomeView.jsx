@@ -2,7 +2,6 @@ import { fmt, formatDateShort, relativeTime } from "lib/format";
 
 export default function HomeView({
   databases,
-  auditLogs,
   loading = false,
   onOpenDb,
   onOpenCreateDb,
@@ -12,7 +11,6 @@ export default function HomeView({
   canManageFunds = false
 }) {
   const activeDbs = databases.filter(db => !db.is_deleted);
-  const recent = auditLogs.slice(0, 5);
 
   return (
     <div className="view">

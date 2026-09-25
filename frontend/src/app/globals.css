@@ -90,31 +90,11 @@ header {
   min-width: 0;
 }
 
-.theme-toggle,
 .btn,
 .nav-tab,
 .user-menu,
 .user-dropdown-item {
   font-family: "Instrument Sans", sans-serif;
-}
-
-.theme-toggle {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 6px 12px;
-  cursor: pointer;
-  color: var(--accent);
-  font-size: 0.85rem;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.theme-toggle:hover {
-  border-color: var(--primary);
-  box-shadow: var(--glow);
 }
 
 .user-menu {
@@ -325,14 +305,12 @@ header {
   font-style: italic;
 }
 
-.activity-feed,
 .db-card,
 .chip,
 .chart-card,
 .audit-log,
 .trash-item,
-.modal,
-.auth-card {
+.modal {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -637,19 +615,6 @@ tr:hover td {
   flex-wrap: wrap;
 }
 
-.activity-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: start;
-  padding: 8px 0;
-}
-
-.activity-row-time {
-  color: var(--muted);
-  font-size: 0.75rem;
-  white-space: nowrap;
-}
 
 .audit-log {
   padding: 14px;
@@ -857,48 +822,12 @@ tr:hover td {
 }
 
 .btn:focus-visible,
-.theme-toggle:focus-visible,
 .nav-tab:focus-visible,
 .user-menu:focus-visible,
-.auth-tab:focus-visible,
 .type-btn:focus-visible,
 .mode-tab:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-.auth-container {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 30px;
-}
-
-.auth-card {
-  width: min(440px, 100%);
-  padding: 24px;
-}
-
-.auth-tabs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin: 18px 0;
-}
-
-.auth-tab {
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--muted);
-  border-radius: 8px;
-  padding: 10px;
-  cursor: pointer;
-}
-
-.auth-tab.active {
-  color: var(--primary);
-  border-bottom-color: var(--primary);
 }
 
 /* Transaction type + mode controls */
@@ -968,14 +897,6 @@ tr:hover td {
   border-color: var(--accent);
   background: rgba(0, 229, 255, 0.1);
   color: var(--accent);
-}
-
-.auth-form {
-  display: none;
-}
-
-.auth-form.active {
-  display: block;
 }
 
 .toast-container {
@@ -1209,7 +1130,6 @@ tr:hover td {
     min-width: 860px;
   }
 
-  .activity-row,
   .audit-item {
     grid-template-columns: 1fr;
   }
@@ -1219,7 +1139,6 @@ tr:hover td {
     align-items: stretch;
   }
 
-  .activity-row-time,
   .audit-time {
     white-space: normal;
   }
@@ -1228,14 +1147,6 @@ tr:hover td {
     flex-direction: column;
     align-items: stretch;
     gap: 10px;
-  }
-
-  .auth-container {
-    padding: 16px;
-  }
-
-  .auth-card {
-    padding: 22px;
   }
 
   .modal {
