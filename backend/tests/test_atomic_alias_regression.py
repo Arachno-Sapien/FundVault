@@ -31,54 +31,22 @@ from datetime import timedelta
 from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
+from apps.accounts.models import User
 from apps.ledger.models import DatabaseFund, RecurringTransaction, TransactionFund
 from apps.ledger.services import process_due_recurring
-from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# Django computes each TestCase's database allowlist before setUp runs, so
-# this alias must already be registered at import time (see
-# tests/test_org_middleware.py, which established this pattern).
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
-class AtomicAliasRegressionTests(TransactionTestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        # Re-register in case an unrelated test's connection churn (the LRU
-        # cap in apps.orgs.connections is process-wide) evicted it between
-        # module import and here.
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class AtomicAliasRegressionTests(OrgTestMixin, TransactionTestCase):
     def setUp(self):
         self.client = Client()
         Org.objects.create(
             id="o1", name="Acme", slug="acme",
             owner_email="o@example.com", db_connection=TENANT_URL,
         )
-        self.owner_token = self._user("u_owner", "owner")
-
-    def _user(self, user_id, role):
-        token = create_session_token(user_id, "o1")
-        with org_context(ORG_ALIAS):
-            User.objects.create(
-                id=user_id, username=user_id, email=f"{user_id}@example.com",
-                password_hash="x", role=role, is_active=True,
-            )
-            Session.objects.create(
-                id=f"s_{user_id}", user_id=user_id, token=token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
-        return token
+        self.owner_token = self.make_user("u_owner", "owner")
 
     def _auth(self):
         return {"HTTP_AUTHORIZATION": f"Bearer {self.owner_token}"}
