@@ -1,41 +1,18 @@
 import json
-from datetime import timedelta
 
 from django.db import connections
 from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
+from apps.accounts.models import User
 from apps.ledger.models import DatabaseFund, TransactionFund
-from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import EmailIndex, Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# The middleware resolves org "o1" to this alias at request time (see
-# apps.orgs.connections.alias_for_org), not to the static "tenant_dev" alias —
-# each org gets its own dynamically-registered connection. Django's per-test
-# database allowlist is computed before any test's setUp runs, so the alias
-# must already exist at import time (see tests/test_org_middleware.py and
-# tests/test_ledger_permissions.py, which established this pattern).
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
-class MemberManagementTests(TestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        # Re-register in case an unrelated test's connection churn (the LRU
-        # cap in apps.orgs.connections is process-wide) evicted it between
-        # module import and here.
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class MemberManagementTests(OrgTestMixin, TestCase):
     def setUp(self):
         self.client = Client()
         self.org = Org.objects.create(
@@ -47,20 +24,10 @@ class MemberManagementTests(TestCase):
         self.member = self._user("u_member", "member")
 
     def _user(self, user_id, role):
-        token = create_session_token(user_id, "o1")
         # Joining an org writes the control-plane discovery row (see the spec's
         # email_index section); every member here has one.
         EmailIndex.objects.create(email=f"{user_id}@example.com", org=self.org)
-        with org_context(ORG_ALIAS):
-            User.objects.create(
-                id=user_id, username=user_id, email=f"{user_id}@example.com",
-                password_hash="x", role=role, is_active=True,
-            )
-            Session.objects.create(
-                id=f"s_{user_id}", user_id=user_id, token=token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
-        return token
+        return self.make_user(user_id, role)
 
     def _put(self, token, user_id, payload):
         return self.client.put(
