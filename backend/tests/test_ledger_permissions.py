@@ -53,6 +53,15 @@ class LedgerPermissionTests(TestCase):
                 id="f1", name="Fund", balance=1000.0, approval_threshold=500.0,
                 created_by_id="u_owner",
             )
+            # An opening credit backs the balance above: recalculate_running_balances
+            # (now used by every approved post, including process_due_recurring)
+            # rebuilds a fund's balance from its approved rows, so a balance with
+            # nothing behind it would be wiped to 0 the moment anything posts.
+            TransactionFund.objects.create(
+                id="t_opening", database_id="f1", type="credit", amount=1000.0,
+                date=timezone.now() - timedelta(days=365), mode="cash",
+                running_balance=1000.0, approved=True, created_by_id="u_owner",
+            )
 
     def _user(self, user_id, role):
         token = create_session_token(user_id, "o1")
@@ -260,13 +269,9 @@ class RecurringApprovalRuleTests(LedgerPermissionTests):
         self.assertFalse(created[0].requires_approval)
 
     def test_pending_recurring_debit_moves_balance_only_once_approved(self):
+        # setUp's opening credit already backs the fixture's 1000.0 balance,
+        # which approval's recalculate needs.
         with org_context(ORG_ALIAS):
-            # Approval rebuilds the balance from approved rows, so the
-            # fixture's 1000.0 needs a row behind it.
-            TransactionFund.objects.create(
-                id="t_opening", database_id="f1", type="credit", amount=1000.0,
-                date=timezone.now() - timedelta(days=1), mode="cash", running_balance=1000.0,
-            )
             rec = self._make_recurring("r_debit", "u_member", amount=600.0)
             RecurringTransaction.objects.filter(id=rec.id).update(type="debit")
         created = self._process()

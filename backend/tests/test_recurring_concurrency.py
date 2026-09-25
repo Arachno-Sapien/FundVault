@@ -1,5 +1,6 @@
 import threading
 import time
+from datetime import timedelta
 from unittest import mock
 
 from django.db import connections
@@ -46,6 +47,15 @@ class ConcurrentRecurringProcessTests(TransactionTestCase):
                 role=User.Role.OWNER,
             )
             DatabaseFund.objects.create(id="f1", created_by=user, name="Fund", balance=100.0)
+            # An opening credit backs the balance above: process_due_recurring now
+            # posts through services.post_transaction, which rebuilds the fund's
+            # balance from its approved rows (recalculate_running_balances) instead
+            # of trusting a balance with no rows behind it.
+            TransactionFund.objects.create(
+                id="t_opening", database_id="f1", type="credit", amount=100.0,
+                date=timezone.now() - timedelta(days=1), mode="cash",
+                running_balance=100.0, approved=True, created_by=user,
+            )
             RecurringTransaction.objects.create(
                 id="r1", database_id="f1", type="credit", amount=10.0,
                 frequency="monthly", description="rent",
@@ -62,7 +72,8 @@ class ConcurrentRecurringProcessTests(TransactionTestCase):
 
         self.assertEqual(errors, [], f"threads raised: {errors}")
         with org_context("tenant_dev"):
-            posted = TransactionFund.objects.filter(database_id="f1").count()
+            # Excludes the setUp opening credit: only the recurring rule's own posts count here.
+            posted = TransactionFund.objects.filter(database_id="f1").exclude(id="t_opening").count()
             balance = DatabaseFund.objects.get(id="f1").balance
         self.assertEqual(posted, 1, "the same due rule was posted by both runs")
         self.assertEqual(balance, 110.0)

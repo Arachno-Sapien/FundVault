@@ -24,7 +24,7 @@ def recalculate_running_balances(database_id):
         # Lock the fund before reading its rows, as every money write does:
         # otherwise a create committing between the read and the balance
         # write below is overwritten by a total that never saw it.
-        DatabaseFund.objects.select_for_update().filter(id=database_id).first()
+        lock_fund(database_id)
         approved = (
             TransactionFund.objects.filter(database_id=database_id, is_voided=False, approved=True)
             .order_by("date", "created_at", "id")
@@ -40,6 +40,51 @@ def recalculate_running_balances(database_id):
         TransactionFund.objects.bulk_update(changed, ["running_balance"], batch_size=500)
         DatabaseFund.objects.filter(id=database_id).update(balance=balance)
         return balance
+
+
+class InsufficientBalance(Exception):
+    """A debit larger than the fund's current balance."""
+
+
+def lock_fund(database_id):
+    """Row-lock a fund inside the caller's tenant atomic block and return it.
+
+    Every money write takes this first -- the fund, then its transaction rows
+    -- so writes to one fund run one at a time and never deadlock each other.
+    """
+    return DatabaseFund.objects.select_for_update().filter(id=database_id).first()
+
+
+def post_transaction(fund, *, tx_type, amount, date, requires_approval, created_by_id, **fields):
+    """Insert a transaction into a fund locked with lock_fund().
+
+    A debit larger than the balance is refused whether or not it needs
+    approval. One that needs approval is stored pending and leaves the balance
+    alone (transaction_approve moves it later); an approved one moves the
+    balance, and running balances are rebuilt so a backdated entry leaves every
+    later row right.
+    """
+    if tx_type == "debit" and amount > fund.balance:
+        raise InsufficientBalance()
+    running = fund.balance if requires_approval else round(
+        fund.balance + amount if tx_type == "credit" else fund.balance - amount, 2
+    )
+    txn = TransactionFund.objects.create(
+        id=uid(),
+        database_id=fund.id,
+        type=tx_type,
+        amount=amount,
+        date=date,
+        running_balance=running,
+        requires_approval=requires_approval,
+        approved=not requires_approval,
+        created_by_id=created_by_id,
+        **fields,
+    )
+    if not requires_approval:
+        fund.balance = recalculate_running_balances(fund.id)
+        txn.refresh_from_db(fields=["running_balance"])
+    return txn
 
 
 def next_recurring_date(current_date, frequency):
@@ -86,15 +131,7 @@ def process_due_recurring(user):
             )
             if rec is None:
                 continue
-            # Re-read the fund under a row lock: rec.database came from an
-            # unlocked select_related() prefetch, so a concurrent debit/approval
-            # could move the balance between that read and this write.
-            db = DatabaseFund.objects.select_for_update().get(id=rec.database_id)
-            if rec.type == "debit" and rec.amount > db.balance:
-                rec.next_run = next_recurring_date(rec.next_run, rec.frequency)
-                rec.save(update_fields=["next_run"])
-                continue
-
+            db = lock_fund(rec.database_id)
             # Re-evaluated against the creator's *current* standing every run
             # (not frozen at creation time). Fail closed: only a creator who
             # still exists, is active, and could still create this rule
@@ -104,32 +141,26 @@ def process_due_recurring(user):
             requires_approval = not can(rec.created_by, Action.MANAGE_FUNDS) and needs_approval(
                 User(role=User.Role.MEMBER), rec.amount, db.approval_threshold
             )
-            new_balance = (
-                db.balance
-                if requires_approval
-                else round(db.balance + rec.amount if rec.type == "credit" else db.balance - rec.amount, 2)
-            )
-            txn = TransactionFund.objects.create(
-                id=uid(),
-                database_id=db.id,
-                type=rec.type,
-                amount=rec.amount,
-                date=timezone.now(),
-                sender="Recurring",
-                receiver=rec.description or "",
-                mode=TransactionFund.TxnMode.ELECTRONIC,
-                mode_data=json.dumps({"elecId": f"REC-{rec.id}"}),
-                location="Auto",
-                notes=f"Recurring {rec.frequency} transaction",
-                running_balance=new_balance,
-                requires_approval=requires_approval,
-                approved=not requires_approval,
-                created_by_id=rec.created_by_id,
-                is_voided=False,
-            )
-            if not requires_approval:
-                db.balance = new_balance
-                db.save(update_fields=["balance"])
+            try:
+                txn = post_transaction(
+                    db,
+                    tx_type=rec.type,
+                    amount=rec.amount,
+                    date=timezone.now(),
+                    requires_approval=requires_approval,
+                    created_by_id=rec.created_by_id,
+                    sender="Recurring",
+                    receiver=rec.description or "",
+                    mode=TransactionFund.TxnMode.ELECTRONIC,
+                    mode_data=json.dumps({"elecId": f"REC-{rec.id}"}),
+                    location="Auto",
+                    notes=f"Recurring {rec.frequency} transaction",
+                    is_voided=False,
+                )
+            except InsufficientBalance:
+                rec.next_run = next_recurring_date(rec.next_run, rec.frequency)
+                rec.save(update_fields=["next_run"])
+                continue
             rec.next_run = next_recurring_date(rec.next_run, rec.frequency)
             rec.save(update_fields=["next_run"])
             add_audit(

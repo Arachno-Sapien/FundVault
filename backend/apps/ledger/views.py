@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Count, Q, Sum
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -26,7 +26,13 @@ from apps.ledger.serializers import (
     serialize_transaction,
     serialize_trash,
 )
-from apps.ledger.services import process_due_recurring, recalculate_running_balances
+from apps.ledger.services import (
+    InsufficientBalance,
+    lock_fund,
+    post_transaction,
+    process_due_recurring,
+    recalculate_running_balances,
+)
 from apps.orgs.context import current_org_alias
 
 logger = logging.getLogger(__name__)
@@ -50,13 +56,8 @@ def _parse_iso_datetime(raw):
         return None
 
 
-def _get_user_database(user, database_id, include_deleted=False):
-    """Look up a fund within the caller's org.
-
-    The org boundary is the database connection itself, so no ownership filter
-    is applied here. The `user` parameter is retained because callers pass it
-    and Phase 4 uses it for role checks.
-    """
+def _get_fund(database_id, include_deleted=False):
+    """Look up a fund in the caller's org (the tenant connection is the org boundary)."""
     query = DatabaseFund.objects.filter(id=database_id)
     if not include_deleted:
         query = query.filter(is_deleted=False)
@@ -159,8 +160,8 @@ def databases_merge(request):
     if source_id == target_id:
         return json_error("Cannot merge a database with itself", 400)
 
-    source = _get_user_database(request.fv_user, source_id)
-    target = _get_user_database(request.fv_user, target_id)
+    source = _get_fund(source_id)
+    target = _get_fund(target_id)
     if not source or not target:
         return json_error("Database not found", 404)
 
@@ -209,7 +210,7 @@ def databases_merge(request):
 @csrf_exempt
 @auth_required
 def database_detail(request, database_id):
-    db = _get_user_database(request.fv_user, database_id)
+    db = _get_fund(database_id)
     if not db:
         return json_error("Database not found", 404)
 
@@ -268,7 +269,7 @@ def database_archive(request, database_id):
     denied = require(request.fv_user, Action.MANAGE_FUNDS)
     if denied:
         return denied
-    db = _get_user_database(request.fv_user, database_id)
+    db = _get_fund(database_id)
     if not db:
         return json_error("Database not found", 404)
     db.is_archived = not db.is_archived
@@ -286,7 +287,7 @@ def database_archive(request, database_id):
 @csrf_exempt
 @auth_required
 def database_transactions(request, database_id):
-    db = _get_user_database(request.fv_user, database_id)
+    db = _get_fund(database_id)
     if not db:
         return json_error("Database not found", 404)
 
@@ -323,50 +324,31 @@ def database_transactions(request, database_id):
         return json_error("Amount must be greater than 0", 400)
     if tx_date is None:
         return json_error("Transaction date is required", 400)
-    # Must open on the org's own alias: select_for_update() below requires an
-    # already-open transaction on the SAME alias its query targets, and a
-    # bare atomic() always opens on "default" instead.
+    # The org's own alias: select_for_update() needs a transaction on the alias it queries.
     with transaction.atomic(using=current_org_alias()):
-        # Re-read the fund under a row lock: the balance read above happened
-        # outside any transaction and another request may have moved it.
-        locked = DatabaseFund.objects.select_for_update().filter(id=database_id).first()
-        if not locked:
+        fund = lock_fund(database_id)
+        if not fund:
             return json_error("Database not found", 404)
-
-        if tx_type == "debit" and amount > locked.balance:
+        requires_approval = needs_approval(request.fv_user, amount, fund.approval_threshold)
+        try:
+            txn = post_transaction(
+                fund,
+                tx_type=tx_type,
+                amount=amount,
+                date=tx_date,
+                requires_approval=requires_approval,
+                created_by_id=request.fv_user.id,
+                sender=sender or None,
+                receiver=receiver or None,
+                mode=mode,
+                mode_data=json.dumps(mode_data),
+                location=location or None,
+                notes=notes or None,
+                receipt_key=None,
+            )
+        except InsufficientBalance:
             return json_error("Insufficient balance", 400)
-
-        requires_approval = needs_approval(request.fv_user, amount, locked.approval_threshold)
-        new_balance = (
-            locked.balance
-            if requires_approval
-            else round(locked.balance + amount if tx_type == "credit" else locked.balance - amount, 2)
-        )
-
-        txn = TransactionFund.objects.create(
-            id=uid(),
-            database_id=database_id,
-            type=tx_type,
-            amount=amount,
-            date=tx_date,
-            sender=sender or None,
-            receiver=receiver or None,
-            mode=mode,
-            mode_data=json.dumps(mode_data),
-            location=location or None,
-            notes=notes or None,
-            running_balance=new_balance,
-            receipt_key=None,
-            requires_approval=requires_approval,
-            approved=(not requires_approval),
-            created_by_id=request.fv_user.id,
-        )
-        if not requires_approval:
-            # The row above was stamped with a running balance as if it were the
-            # latest entry; a backdated one isn't, so rebuild the fund's rows in
-            # date order (one SELECT and no row updates when it is the latest).
-            new_balance = recalculate_running_balances(database_id)
-            txn.refresh_from_db(fields=["running_balance"])
+    new_balance = fund.balance
 
     add_audit(
         request.fv_user.id,
@@ -409,9 +391,7 @@ def transaction_void(request, transaction_id):
 
     # Tenant-routed model -- see the comment on database_transactions above.
     with transaction.atomic(using=current_org_alias()):
-        # Lock the fund first (fund, then transaction, like create and
-        # approve) so a concurrent create can't slip in before the recalc.
-        DatabaseFund.objects.select_for_update().filter(id=txn.database_id).first()
+        lock_fund(txn.database_id)
         txn.is_voided = True
         txn.void_reason = reason
         txn.voided_by = request.fv_user.username
@@ -449,9 +429,7 @@ def transaction_delete_voided(request, transaction_id):
 
     # Tenant-routed model -- see the comment on database_transactions above.
     with transaction.atomic(using=current_org_alias()):
-        # Lock the fund first (fund, then transaction, like create and
-        # approve) so a concurrent create can't slip in before the recalc.
-        DatabaseFund.objects.select_for_update().filter(id=db_id).first()
+        lock_fund(db_id)
         txn.delete()
         recalculate_running_balances(db_id)
         _delete_receipts_on_commit(request, [txn.receipt_key])
@@ -487,24 +465,19 @@ def transaction_approve(request, transaction_id):
     # Must open on the org's own alias -- see the comment on
     # database_transactions above (select_for_update() below needs it).
     with transaction.atomic(using=current_org_alias()):
-        locked = DatabaseFund.objects.select_for_update().filter(id=txn.database_id).first()
+        locked = lock_fund(txn.database_id)
         if not locked:
             return json_error("Database not found", 404)
 
         if txn.type == "debit" and txn.amount > locked.balance:
             return json_error("Insufficient balance to approve this debit transaction", 400)
 
-        new_balance = round(
-            locked.balance + txn.amount if txn.type == "credit" else locked.balance - txn.amount, 2
-        )
         txn.approved = True
         txn.approved_by = request.fv_user.username
         txn.approved_at = timezone.now()
-        txn.running_balance = new_balance
-        txn.save(update_fields=["approved", "approved_by", "approved_at", "running_balance"])
-        locked.balance = new_balance
-        locked.save(update_fields=["balance"])
-        recalculate_running_balances(locked.id)
+        txn.save(update_fields=["approved", "approved_by", "approved_at"])
+        # Rebuilds this row's running balance (it may be backdated) and the fund's.
+        new_balance = recalculate_running_balances(locked.id)
 
     add_audit(
         request.fv_user.id,
@@ -552,9 +525,7 @@ def transaction_update(request, transaction_id):
     txn.location = str(body.get("location", txn.location or "")).strip() or None
     txn.notes = str(body.get("notes", txn.notes or "")).strip() or None
     with transaction.atomic(using=current_org_alias()):
-        # Lock the fund first (fund, then transaction, like create and
-        # approve) so a concurrent create can't slip in before the recalc.
-        DatabaseFund.objects.select_for_update().filter(id=txn.database_id).first()
+        lock_fund(txn.database_id)
         txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
         recalculate_running_balances(txn.database_id)
     add_audit(request.fv_user.id, "update", "transaction", txn.id, "Transaction edited")
@@ -576,39 +547,17 @@ def analytics_overview(request):
     if request.method != "GET":
         return json_error("Method not allowed", 405)
 
-    databases = DatabaseFund.objects.filter(is_deleted=False)
-    db_ids = list(databases.values_list("id", flat=True))
-    if not db_ids:
-        return JsonResponse(
-            {
-                "totalDatabases": 0,
-                "totalBalance": 0,
-                "totalCredits": 0,
-                "totalDebits": 0,
-                "monthlyData": [],
-                "modeData": [],
-            }
-        )
-
-    credits = (
-        TransactionFund.objects.filter(database_id__in=db_ids, type="credit", is_voided=False)
-        .aggregate(total=Sum("amount"))
-        .get("total")
-        or 0
+    funds = DatabaseFund.objects.filter(is_deleted=False).aggregate(count=Count("id"), balance=Sum("balance"))
+    totals = TransactionFund.objects.filter(database__is_deleted=False, is_voided=False).aggregate(
+        credits=Sum("amount", filter=Q(type="credit")),
+        debits=Sum("amount", filter=Q(type="debit")),
     )
-    debits = (
-        TransactionFund.objects.filter(database_id__in=db_ids, type="debit", is_voided=False)
-        .aggregate(total=Sum("amount"))
-        .get("total")
-        or 0
-    )
-    total_balance = databases.aggregate(total=Sum("balance")).get("total") or 0
     return JsonResponse(
         {
-            "totalDatabases": databases.count(),
-            "totalBalance": total_balance,
-            "totalCredits": credits,
-            "totalDebits": debits,
+            "totalDatabases": funds["count"],
+            "totalBalance": funds["balance"] or 0,
+            "totalCredits": totals["credits"] or 0,
+            "totalDebits": totals["debits"] or 0,
         }
     )
 
@@ -691,7 +640,7 @@ def trash_delete(request, item_id):
 @csrf_exempt
 @auth_required
 def recurring_list_create(request, database_id):
-    db = _get_user_database(request.fv_user, database_id)
+    db = _get_fund(database_id)
     if not db:
         return json_error("Database not found", 404)
 
@@ -796,9 +745,16 @@ def extract_receipt(request):
     from apps.ledger.receipt_extractor import extract_from_receipt_image, parse_ai_config
 
     config = parse_ai_config(request.fv_org.ai_config)
+    if not config["primary"] and not config["fallback"]:
+        return JsonResponse(
+            {
+                "error": "Receipt extraction is not configured for this organisation. "
+                         "An Owner can add an AI provider in organisation settings."
+            },
+            status=503,
+        )
     result = extract_from_receipt_image(image_file.read(), image_file.content_type or "", config)
-    status = 503 if result.get("error", "").endswith("organisation settings.") else 200
-    return JsonResponse(result, status=status)
+    return JsonResponse(result)
 
 
 @csrf_exempt
