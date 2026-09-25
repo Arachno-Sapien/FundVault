@@ -50,7 +50,7 @@ FundVault/
 │   ├── vercel.json
 │   └── .env.example
 ├── docker-compose.yml                # Local control-plane + dev-tenant Postgres
-├── render.yaml                       # Render deployment for the backend + control-plane DB
+├── render.yaml                       # Render Blueprint for the backend web service
 ├── API_DOCUMENTATION.md              # Complete API reference
 ├── install.bat                       # Windows installation script
 ├── run.bat                           # Windows application launcher
@@ -188,8 +188,9 @@ FundVault has no shared infrastructure to bring your own data to — you supply:
   string works: [Supabase](https://supabase.com), [Neon](https://neon.tech),
   [Railway](https://railway.app), your own server, anything Postgres-compatible.
   Supabase and Neon are used through their **pooled** connection string
-  (Supabase port 6543) — their direct-connection limits are too low for
-  several active orgs sharing the process.
+  (on Supabase, the **Session pooler** string, `…pooler.supabase.com:5432`)
+  — their direct-connection limits are too low for several active orgs
+  sharing the process.
 - **S3-compatible object storage**, for receipt images. Supabase Storage or
   any S3-compatible endpoint (Cloudflare R2, MinIO, AWS S3, ...) — an
   endpoint URL, bucket name, region, and an access key pair. The bucket must

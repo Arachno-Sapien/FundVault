@@ -90,7 +90,7 @@ echo   ✓ Installation Complete!
 echo.
 echo   What's installed:
 echo   - Frontend: Next.js, React, Chart.js, jsPDF
-echo   - Backend: Django, DRF, JWT, bcrypt, per-org AI + storage clients
+echo   - Backend: Django, JWT, bcrypt, per-org AI + storage clients
 echo   - Image Processing: Pillow
 echo   - Configuration: python-dotenv
 echo.

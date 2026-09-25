@@ -752,6 +752,7 @@ open to any role, including Viewer.
 **Error Responses:**
 
 - `400`: Name required
+- `400`: Thresholds must be numbers
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `405`: Method not allowed
@@ -808,6 +809,7 @@ open to any role, including Viewer.
 **Error Responses:**
 
 - `400`: Name required
+- `400`: Thresholds must be numbers
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Database not found
@@ -1680,7 +1682,15 @@ can't be reached is reported and skipped rather than failing the whole run.
 
 - All timestamps are stored in UTC with timezone offset information.
 - Fund balances and transaction amounts are stored as floats, not fixed-point
-  decimals.
+  decimals. Every computed amount and balance is rounded to 2 decimal places.
+- `amount`, `lowBalanceThreshold` and `approvalThreshold` must be finite
+  numbers: `nan`, `inf`/`-inf`, booleans and non-numeric values (a string
+  that doesn't parse as a number, `null`, an object) are all rejected with
+  `400` (`Thresholds must be numbers` for the database endpoints, or the
+  relevant amount validation error for transactions).
+- A JSON request body that isn't an object (an array, a bare number/string,
+  or invalid JSON) is treated as an empty object, so it fails the endpoint's
+  own required-field checks with `400` rather than a parse error.
 - Receipts are never stored inline as base64 — only an object key
   (`receipt_key`) plus a signed URL minted at read time (`receipt_url`,
   ~1 hour validity). An org without storage configured simply has no
