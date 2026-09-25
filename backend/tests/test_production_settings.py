@@ -108,6 +108,19 @@ class ProductionSettingsTests(SimpleTestCase):
             with self.assertRaisesMessage(ImproperlyConfigured, "not a valid Fernet key"):
                 _load()
 
+    def test_production_runs_the_base_middleware_plus_whitenoise(self):
+        from fundvault_backend import settings as base
+
+        whitenoise = "whitenoise.middleware.WhiteNoiseMiddleware"
+        with mock.patch.dict(os.environ, REQUIRED, clear=True):
+            production = _load().MIDDLEWARE
+        # The tests run the base stack: production may only add WhiteNoise to it.
+        self.assertEqual([m for m in production if m != whitenoise], base.MIDDLEWARE)
+        self.assertEqual(
+            production[production.index("corsheaders.middleware.CorsMiddleware") + 1], whitenoise
+        )
+        self.assertNotIn(whitenoise, base.MIDDLEWARE)
+
     def test_x_frame_options_header_is_actually_sent(self):
         with mock.patch.dict(os.environ, REQUIRED, clear=True):
             settings = _load()

@@ -84,13 +84,10 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 6 * 1024 * 1024  # receipts are capped at 5 MB
 STORAGES = {
     "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
 }
+# A new list, not insert(): MIDDLEWARE is the base module's own list object.
+_after_cors = MIDDLEWARE.index("corsheaders.middleware.CorsMiddleware") + 1
 MIDDLEWARE = [
-    "corsheaders.middleware.CorsMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
-    "django.middleware.security.SecurityMiddleware",
-    "django.middleware.common.CommonMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "apps.orgs.middleware.OrgContextMiddleware",
+    *MIDDLEWARE[:_after_cors], "whitenoise.middleware.WhiteNoiseMiddleware", *MIDDLEWARE[_after_cors:]
 ]
 
 LOGGING = {

@@ -12,7 +12,6 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.staticfiles",
     "corsheaders",
-    "rest_framework",
     "apps.accounts.apps.AccountsConfig",
     "apps.ledger",
     "apps.orgs.apps.OrgsConfig",
@@ -20,7 +19,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "apps.orgs.middleware.OrgContextMiddleware",
 ]
 
