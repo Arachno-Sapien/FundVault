@@ -212,6 +212,7 @@ class LedgerMoneyTests(OrgTestMixin, TestCase):
         response = self._post_txn("credit", 10)
         self.assertEqual(response.status_code, 400, response.content)
         self.assertEqual(response.json()["error"], "This fund is archived")
+        self.assertEqual(self._fund().balance, 0.0)
 
     def test_cannot_post_a_transaction_that_is_archived_while_waiting_on_the_lock(self):
         # The pre-lock is_archived check above is only a fast path. If a merge
@@ -235,3 +236,64 @@ class LedgerMoneyTests(OrgTestMixin, TestCase):
         with org_context(ORG_ALIAS):
             self.assertEqual(TransactionFund.objects.filter(database_id="f1").count(), 0)
         self.assertEqual(self._fund().balance, 0.0)
+
+    def test_cannot_approve_a_transaction_in_an_archived_fund(self):
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="debit", amount=10.0,
+                date=timezone.now(), mode="cash", running_balance=0.0,
+                requires_approval=True, approved=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=100.0, is_archived=True)
+        response = self._send("post", "/api/transactions/t1/approve", {})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "This fund is archived")
+        with org_context(ORG_ALIAS):
+            self.assertFalse(TransactionFund.objects.get(id="t1").approved)
+        self.assertEqual(self._fund().balance, 100.0)
+
+    def test_cannot_void_a_transaction_in_an_archived_fund(self):
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=10.0,
+                date=timezone.now(), mode="cash", running_balance=10.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=10.0, is_archived=True)
+        response = self._send("post", "/api/transactions/t1/void", {"reason": "oops"})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "This fund is archived")
+        with org_context(ORG_ALIAS):
+            self.assertFalse(TransactionFund.objects.get(id="t1").is_voided)
+        self.assertEqual(self._fund().balance, 10.0)
+
+    def test_cannot_edit_a_transaction_in_an_archived_fund(self):
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=10.0,
+                date=timezone.now(), mode="cash", running_balance=10.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=10.0, is_archived=True)
+        response = self._send("put", "/api/transactions/t1", {"amount": 20.0})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "This fund is archived")
+        with org_context(ORG_ALIAS):
+            self.assertEqual(TransactionFund.objects.get(id="t1").amount, 10.0)
+        self.assertEqual(self._fund().balance, 10.0)
+
+    def test_cannot_delete_a_voided_transaction_in_an_archived_fund(self):
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=10.0,
+                date=timezone.now(), mode="cash", running_balance=10.0,
+                approved=True, requires_approval=False, is_voided=True,
+                void_reason="x", created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=10.0, is_archived=True)
+        response = self._send("delete", "/api/transactions/t1/delete", {})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "This fund is archived")
+        with org_context(ORG_ALIAS):
+            self.assertTrue(TransactionFund.objects.filter(id="t1").exists())
+        self.assertEqual(self._fund().balance, 10.0)

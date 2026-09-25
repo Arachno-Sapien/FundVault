@@ -285,3 +285,39 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
         with org_context(ORG_ALIAS):
             merged_id = body["id"]
             self.assertEqual(DatabaseFund.objects.get(id=merged_id).balance, 150.0)
+
+    def test_double_submitted_merge_does_not_duplicate_money(self):
+        # The first merge archives source and target under their fund locks.
+        # A second, double-submitted merge of the same pair serializes on
+        # those same locks (it no longer races them) and must then see the
+        # now-archived funds and refuse, instead of copying their
+        # transactions a second time into a second live fund.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="src", name="Source", created_by_id="u_owner")
+            DatabaseFund.objects.create(id="tgt", name="Target", created_by_id="u_owner")
+            now = timezone.now()
+            TransactionFund.objects.create(
+                id="ts1", database_id="src", type="credit", amount=100.0,
+                date=now, mode="cash", running_balance=100.0,
+                approved=True, requires_approval=False,
+            )
+            TransactionFund.objects.create(
+                id="tt1", database_id="tgt", type="credit", amount=50.0,
+                date=now, mode="cash", running_balance=50.0,
+                approved=True, requires_approval=False,
+            )
+        body = json.dumps({"sourceId": "src", "targetId": "tgt", "name": "Merged"})
+        first = self.client.post(
+            "/api/databases/merge", data=body, content_type="application/json", **self.owner_auth,
+        )
+        self.assertEqual(first.status_code, 200, first.content)
+        second = self.client.post(
+            "/api/databases/merge", data=body, content_type="application/json", **self.owner_auth,
+        )
+        self.assertEqual(second.status_code, 400, second.content)
+        self.assertEqual(second.json()["error"], "This fund is archived")
+        with org_context(ORG_ALIAS):
+            live = list(
+                DatabaseFund.objects.filter(is_archived=False, is_deleted=False).values_list("name", "balance")
+            )
+        self.assertEqual(live, [("Merged", 150.0)])

@@ -189,8 +189,17 @@ def databases_merge(request):
         # never makes it into the copy already taken -- left behind, orphaned,
         # in a fund that is now archived and (per database_transactions) can
         # never take another write.
-        for fund_id in sorted([source_id, target_id]):
-            lock_fund(fund_id)
+        locked = {fund_id: lock_fund(fund_id) for fund_id in sorted([source_id, target_id])}
+        source, target = locked[source_id], locked[target_id]
+        # Re-check under the lock: the pre-lock check above is only a fast
+        # path. A double-submitted merge (or a second merge re-picking an
+        # already-merged source) serializes on this lock instead of racing
+        # it, and must not then copy a fund's transactions a second time into
+        # a new live fund, which would duplicate its money.
+        if not source or source.is_deleted or not target or target.is_deleted:
+            return json_error("Database not found", 404)
+        if source.is_archived or target.is_archived:
+            return json_error("This fund is archived", 400)
         merged = DatabaseFund.objects.create(
             id=uid(),
             created_by_id=request.fv_user.id,
@@ -354,7 +363,7 @@ def database_transactions(request, database_id):
     # The org's own alias: select_for_update() needs a transaction on the alias it queries.
     with transaction.atomic(using=current_org_alias()):
         fund = lock_fund(database_id)
-        if not fund:
+        if not fund or fund.is_deleted:
             return json_error("Database not found", 404)
         # Re-check under the lock: the pre-lock check above is only a fast path.
         # A merge or archive toggle can commit while this POST waits on the lock,
@@ -424,7 +433,11 @@ def transaction_void(request, transaction_id):
 
     # Tenant-routed model -- see the comment on database_transactions above.
     with transaction.atomic(using=current_org_alias()):
-        lock_fund(txn.database_id)
+        fund = lock_fund(txn.database_id)
+        if not fund or fund.is_deleted:
+            return json_error("Database not found", 404)
+        if fund.is_archived:
+            return json_error("This fund is archived", 400)
         txn.is_voided = True
         txn.void_reason = reason
         txn.voided_by = request.fv_user.username
@@ -462,7 +475,11 @@ def transaction_delete_voided(request, transaction_id):
 
     # Tenant-routed model -- see the comment on database_transactions above.
     with transaction.atomic(using=current_org_alias()):
-        lock_fund(db_id)
+        fund = lock_fund(db_id)
+        if not fund or fund.is_deleted:
+            return json_error("Database not found", 404)
+        if fund.is_archived:
+            return json_error("This fund is archived", 400)
         txn.delete()
         recalculate_running_balances(db_id)
         _delete_receipts_on_commit(request, [txn.receipt_key])
@@ -499,8 +516,10 @@ def transaction_approve(request, transaction_id):
     # database_transactions above (select_for_update() below needs it).
     with transaction.atomic(using=current_org_alias()):
         locked = lock_fund(txn.database_id)
-        if not locked:
+        if not locked or locked.is_deleted:
             return json_error("Database not found", 404)
+        if locked.is_archived:
+            return json_error("This fund is archived", 400)
 
         # txn was read above without a lock, before the fund was locked. An
         # Admin's PUT editing this pending debit's amount in that window would
@@ -576,7 +595,11 @@ def transaction_update(request, transaction_id):
     txn.location = str(body.get("location", txn.location or "")).strip() or None
     txn.notes = str(body.get("notes", txn.notes or "")).strip() or None
     with transaction.atomic(using=current_org_alias()):
-        lock_fund(txn.database_id)
+        fund = lock_fund(txn.database_id)
+        if not fund or fund.is_deleted:
+            return json_error("Database not found", 404)
+        if fund.is_archived:
+            return json_error("This fund is archived", 400)
         txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
         recalculate_running_balances(txn.database_id)
     add_audit(request.fv_user.id, "update", "transaction", txn.id, "Transaction edited")

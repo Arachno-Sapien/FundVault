@@ -872,9 +872,12 @@ Toggles the archived flag.
 
 Creates a new database containing both source databases' transactions,
 archives the sources, and recalculates running balances. Both funds are
-locked (in sorted-id order) before their transactions are read, so a
-transaction posted to either one during the merge can never be left behind,
-orphaned, in a fund the merge is about to archive.
+locked (in sorted-id order) before their transactions are read, and are
+re-checked under that lock, so a transaction posted to either one during the
+merge can never be left behind orphaned in a fund the merge is about to
+archive, and a double-submitted merge of the same pair (the second request
+serializes on the same lock) is refused instead of copying the money again
+into a second live fund.
 
 **Request Body:**
 
@@ -892,7 +895,8 @@ recalculated from the copied transactions (not `0` or stale).
 **Error Responses:**
 
 - `400`: Source, target, and name are required / Cannot merge a database
-  with itself
+  with itself / This fund is archived (either fund is already archived,
+  including by an earlier merge of the same pair)
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Database not found
@@ -1061,7 +1065,7 @@ endpoint above).
 
 - `400`: Amount must be greater than 0 / Amount must be at most
   ₹1,000,000,000,000 / Cannot edit a voided transaction /
-  Transaction date is required
+  Transaction date is required / This fund is archived
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Transaction not found
@@ -1087,7 +1091,8 @@ endpoint above).
 
 **Error Responses:**
 
-- `400`: Void reason required / Transaction is already voided
+- `400`: Void reason required / Transaction is already voided / This fund
+  is archived
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Transaction not found
@@ -1118,7 +1123,7 @@ never be approved against a stale copy.
 
 - `400`: Cannot approve a voided transaction / Transaction is already
   approved / Transaction does not require approval / Insufficient balance to
-  approve this debit transaction
+  approve this debit transaction / This fund is archived
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Transaction not found
@@ -1144,7 +1149,7 @@ fail the request if the storage delete itself fails.
 
 **Error Responses:**
 
-- `400`: Only voided transactions can be deleted
+- `400`: Only voided transactions can be deleted / This fund is archived
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Transaction not found
