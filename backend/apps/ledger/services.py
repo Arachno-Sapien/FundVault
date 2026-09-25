@@ -21,16 +21,23 @@ def recalculate_running_balances(database_id):
     # change per-request afterwards) -- it has to be a context manager
     # evaluated fresh on every call instead.
     with transaction.atomic(using=current_org_alias()):
-        approved = list(
+        # Lock the fund before reading its rows, as every money write does:
+        # otherwise a create committing between the read and the balance
+        # write below is overwritten by a total that never saw it.
+        DatabaseFund.objects.select_for_update().filter(id=database_id).first()
+        approved = (
             TransactionFund.objects.filter(database_id=database_id, is_voided=False, approved=True)
             .order_by("date", "created_at", "id")
+            .only("id", "type", "amount", "running_balance")
         )
         balance = 0
+        changed = []
         for txn in approved:
-            balance = balance + txn.amount if txn.type == "credit" else balance - txn.amount
+            balance = round(balance + txn.amount if txn.type == "credit" else balance - txn.amount, 2)
             if txn.running_balance != balance:
                 txn.running_balance = balance
-                txn.save(update_fields=["running_balance"])
+                changed.append(txn)
+        TransactionFund.objects.bulk_update(changed, ["running_balance"], batch_size=500)
         DatabaseFund.objects.filter(id=database_id).update(balance=balance)
         return balance
 
@@ -100,7 +107,7 @@ def process_due_recurring(user):
             new_balance = (
                 db.balance
                 if requires_approval
-                else (db.balance + rec.amount if rec.type == "credit" else db.balance - rec.amount)
+                else round(db.balance + rec.amount if rec.type == "credit" else db.balance - rec.amount, 2)
             )
             txn = TransactionFund.objects.create(
                 id=uid(),

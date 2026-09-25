@@ -11,7 +11,7 @@ from django.views.decorators.csrf import csrf_exempt
 from apps.accounts.permissions import Action, needs_approval, require
 from apps.common.audit import add_audit
 from apps.common.auth import auth_required
-from apps.common.utils import json_error, parse_body, uid
+from apps.common.utils import json_error, parse_body, parse_number, uid
 from apps.ledger.models import (
     AuditLog,
     DatabaseFund,
@@ -117,10 +117,12 @@ def databases_list_create(request):
     payload = parse_body(request)
     name = str(payload.get("name", "")).strip()
     description = str(payload.get("description", "")).strip()
-    low_balance_threshold = float(payload.get("lowBalanceThreshold") or 0)
-    approval_threshold = float(payload.get("approvalThreshold") or 0)
+    low_balance_threshold = parse_number(payload.get("lowBalanceThreshold") or 0)
+    approval_threshold = parse_number(payload.get("approvalThreshold") or 0)
     if not name:
         return json_error("Name required", 400)
+    if low_balance_threshold is None or approval_threshold is None:
+        return json_error("Thresholds must be numbers", 400)
 
     db = DatabaseFund.objects.create(
         id=uid(),
@@ -180,7 +182,7 @@ def databases_merge(request):
         for txn in txns:
             txn.pk = uid()
             txn.database_id = merged.id
-            txn.save(force_insert=True)
+        TransactionFund.objects.bulk_create(txns)
 
         source.is_archived = True
         target.is_archived = True
@@ -220,10 +222,12 @@ def database_detail(request, database_id):
         body = parse_body(request)
         name = str(body.get("name", "")).strip()
         description = str(body.get("description", "")).strip()
-        low_balance_threshold = float(body.get("lowBalanceThreshold") or 0)
-        approval_threshold = float(body.get("approvalThreshold") or 0)
+        low_balance_threshold = parse_number(body.get("lowBalanceThreshold") or 0)
+        approval_threshold = parse_number(body.get("approvalThreshold") or 0)
         if not name:
             return json_error("Name required", 400)
+        if low_balance_threshold is None or approval_threshold is None:
+            return json_error("Thresholds must be numbers", 400)
 
         db.name = name
         db.description = description
@@ -295,10 +299,9 @@ def database_transactions(request, database_id):
 
     body = parse_body(request)
     tx_type = str(body.get("type", "")).strip()
-    try:
-        amount = float(body.get("amount") or 0)
-    except (TypeError, ValueError):
-        return json_error("Amount must be greater than 0", 400)
+    # ponytail: money is a FloatField, so amounts and balances are rounded to
+    # paise at every write; move to DecimalField to drop the rounding.
+    amount = round(parse_number(body.get("amount")) or 0, 2)
     tx_date = _parse_iso_datetime(body.get("date"))
     sender = str(body.get("sender", "")).strip()
     receiver = str(body.get("receiver", "")).strip()
@@ -332,7 +335,7 @@ def database_transactions(request, database_id):
         new_balance = (
             locked.balance
             if requires_approval
-            else (locked.balance + amount if tx_type == "credit" else locked.balance - amount)
+            else round(locked.balance + amount if tx_type == "credit" else locked.balance - amount, 2)
         )
 
         txn = TransactionFund.objects.create(
@@ -354,8 +357,11 @@ def database_transactions(request, database_id):
             created_by_id=request.fv_user.id,
         )
         if not requires_approval:
-            locked.balance = new_balance
-            locked.save(update_fields=["balance"])
+            # The row above was stamped with a running balance as if it were the
+            # latest entry; a backdated one isn't, so rebuild the fund's rows in
+            # date order (one SELECT and no row updates when it is the latest).
+            new_balance = recalculate_running_balances(database_id)
+            txn.refresh_from_db(fields=["running_balance"])
 
     add_audit(
         request.fv_user.id,
@@ -398,6 +404,9 @@ def transaction_void(request, transaction_id):
 
     # Tenant-routed model -- see the comment on database_transactions above.
     with transaction.atomic(using=current_org_alias()):
+        # Lock the fund first (fund, then transaction, like create and
+        # approve) so a concurrent create can't slip in before the recalc.
+        DatabaseFund.objects.select_for_update().filter(id=txn.database_id).first()
         txn.is_voided = True
         txn.void_reason = reason
         txn.voided_by = request.fv_user.username
@@ -435,6 +444,9 @@ def transaction_delete_voided(request, transaction_id):
 
     # Tenant-routed model -- see the comment on database_transactions above.
     with transaction.atomic(using=current_org_alias()):
+        # Lock the fund first (fund, then transaction, like create and
+        # approve) so a concurrent create can't slip in before the recalc.
+        DatabaseFund.objects.select_for_update().filter(id=db_id).first()
         txn.delete()
         recalculate_running_balances(db_id)
         _delete_receipts_on_commit(request, [txn.receipt_key])
@@ -477,8 +489,8 @@ def transaction_approve(request, transaction_id):
         if txn.type == "debit" and txn.amount > locked.balance:
             return json_error("Insufficient balance to approve this debit transaction", 400)
 
-        new_balance = (
-            locked.balance + txn.amount if txn.type == "credit" else locked.balance - txn.amount
+        new_balance = round(
+            locked.balance + txn.amount if txn.type == "credit" else locked.balance - txn.amount, 2
         )
         txn.approved = True
         txn.approved_by = request.fv_user.username
@@ -518,10 +530,7 @@ def transaction_update(request, transaction_id):
     if txn.is_voided:
         return json_error("Cannot edit a voided transaction", 400)
 
-    try:
-        amount = float(body.get("amount") if "amount" in body else txn.amount)
-    except (TypeError, ValueError):
-        return json_error("Enter a valid amount", 400)
+    amount = round(parse_number(body["amount"]) or 0, 2) if "amount" in body else txn.amount
     if amount <= 0:
         return json_error("Enter a valid amount", 400)
     tx_date = txn.date
@@ -538,6 +547,9 @@ def transaction_update(request, transaction_id):
     txn.location = str(body.get("location", txn.location or "")).strip() or None
     txn.notes = str(body.get("notes", txn.notes or "")).strip() or None
     with transaction.atomic(using=current_org_alias()):
+        # Lock the fund first (fund, then transaction, like create and
+        # approve) so a concurrent create can't slip in before the recalc.
+        DatabaseFund.objects.select_for_update().filter(id=txn.database_id).first()
         txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
         recalculate_running_balances(txn.database_id)
     add_audit(request.fv_user.id, "update", "transaction", txn.id, "Transaction edited")
@@ -691,7 +703,7 @@ def recurring_list_create(request, database_id):
 
     body = parse_body(request)
     tx_type = str(body.get("type", "")).strip()
-    amount = float(body.get("amount") or 0)
+    amount = round(parse_number(body.get("amount")) or 0, 2)
     frequency = str(body.get("frequency", "")).strip()
     description = str(body.get("description", "")).strip()
     next_run = body.get("nextRun")

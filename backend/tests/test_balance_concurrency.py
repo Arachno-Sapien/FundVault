@@ -1,82 +1,133 @@
 import threading
+import time
+from datetime import timedelta
 
-from django.db import connections, transaction
-from django.test import TransactionTestCase
+from django.db import connections
+from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
-from apps.accounts.models import User
+from apps.accounts.models import Session, User
+from apps.common.auth import create_session_token
 from apps.ledger.models import DatabaseFund, TransactionFund
+from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
+from apps.orgs.models import Org
+
+TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
+
+# See tests/test_member_management.py for why this alias must exist at import
+# time: Django computes each TestCase's database allowlist before setUp runs.
+ORG_ALIAS = alias_for_org("o1")
+ensure_connection(Org(id="o1", db_connection=TENANT_URL))
 
 
-def _post_debit(fund_id, amount, barrier, errors):
-    """Mimic the view's read-decide-write sequence in a real thread."""
+def _request(method, url, body, token, results, errors, before=None):
+    """Fire one real HTTP request from its own thread (own DB connections)."""
     try:
-        # Force both threads to attempt the locked read together. This must
-        # happen *before* select_for_update() is issued: once a real Postgres
-        # row lock is held, the second thread's own SELECT ... FOR UPDATE
-        # blocks at the database level and can't reach a later rendezvous --
-        # waiting on the barrier from inside the lock would deadlock the two
-        # threads against each other (proven empirically while writing this
-        # test: the first thread times out waiting for the second, which is
-        # itself still blocked acquiring the lock the first thread holds).
-        barrier.wait(timeout=5)
-        with org_context("tenant_dev"), transaction.atomic(using="tenant_dev"):
-            fund = (
-                DatabaseFund.objects
-                .select_for_update()
-                .get(id=fund_id)
-            )
-            if amount > fund.balance:
-                return
-            new_balance = fund.balance - amount
-            TransactionFund.objects.create(
-                id=f"txn-{threading.get_ident()}",
-                database_id=fund_id,
-                type="debit",
-                amount=amount,
-                date=timezone.now(),
-                mode="cash",
-                running_balance=new_balance,
-            )
-            fund.balance = new_balance
-            fund.save(update_fields=["balance"])
-    except Exception as exc:  # surfaced in the assertion below
+        if before:
+            before()
+        response = getattr(Client(), method)(
+            url, data=body, content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        results.append(response)
+    except Exception as exc:  # surfaced in the assertions below
         errors.append(exc)
     finally:
-        connections["tenant_dev"].close()
+        connections["default"].close()
+        connections[ORG_ALIAS].close()
 
 
-class ConcurrentDebitTests(TransactionTestCase):
-    databases = {"tenant_dev"}
+class BalanceConcurrencyTests(TransactionTestCase):
+    databases = {"default", ORG_ALIAS}
+
+    @classmethod
+    def setUpClass(cls):
+        # Re-register in case the process-wide connection LRU evicted it.
+        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+        super().setUpClass()
+
+    def setUp(self):
+        Org.objects.create(
+            id="o1", name="Acme", slug="acme",
+            owner_email="o@example.com", db_connection=TENANT_URL,
+        )
+        self.token = create_session_token("u_owner", "o1")
+        with org_context(ORG_ALIAS):
+            User.objects.create(
+                id="u_owner", username="owner", email="o@example.com",
+                password_hash="x", role="owner", is_active=True,
+            )
+            Session.objects.create(
+                id="s_owner", user_id="u_owner", token=self.token,
+                expires_at=timezone.now() + timedelta(hours=1),
+            )
+            DatabaseFund.objects.create(id="f1", created_by_id="u_owner", name="Fund", balance=100.0)
+            TransactionFund.objects.create(
+                id="t0", database_id="f1", type="credit", amount=100.0,
+                date=timezone.now() - timedelta(days=1), mode="cash", running_balance=100.0,
+            )
+
+    def _fund_balance(self):
+        with org_context(ORG_ALIAS):
+            return DatabaseFund.objects.get(id="f1").balance
 
     def test_two_concurrent_debits_cannot_overdraw(self):
-        with org_context("tenant_dev"):
-            user = User.objects.create(
-                id="u1", username="a", email="a@example.com", password_hash="x"
-            )
-            fund = DatabaseFund.objects.create(
-                id="f1", created_by=user, name="Fund", balance=100.0
-            )
-
         barrier = threading.Barrier(2)
-        errors = []
+        results, errors = [], []
+        body = {"type": "debit", "amount": 80, "mode": "cash", "date": timezone.now().isoformat()}
         threads = [
-            threading.Thread(target=_post_debit, args=(fund.id, 80.0, barrier, errors))
+            threading.Thread(target=_request, args=(
+                "post", "/api/databases/f1/transactions", body, self.token, results, errors,
+                lambda: barrier.wait(timeout=5),
+            ))
             for _ in range(2)
         ]
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=10)
+            t.join(timeout=15)
 
         self.assertEqual(errors, [], f"threads raised: {errors}")
-        with org_context("tenant_dev"):
-            fund.refresh_from_db()
-            posted = TransactionFund.objects.count()
-        self.assertGreaterEqual(
-            fund.balance,
-            0,
-            "two 80.00 debits against a 100.00 balance overdrew the fund",
-        )
-        self.assertEqual(posted, 1, "only one of the two debits should have succeeded")
+        self.assertEqual(sorted(r.status_code for r in results), [200, 400])
+        self.assertEqual(self._fund_balance(), 20.0)
+
+    def test_void_racing_a_create_loses_neither(self):
+        # Hold the void just before it writes the fund balance -- after it has
+        # read the fund's rows -- and let a credit be posted in that window.
+        # Unless the void holds the fund lock for its whole transaction, the
+        # credit commits in between and the void then overwrites the balance
+        # with a total that never saw it.
+        void_has_read = threading.Event()
+
+        def slow_fund_write(execute, sql, params, many, context):
+            if sql.startswith('UPDATE "databases"') and '"balance"' in sql:
+                void_has_read.set()
+                time.sleep(0.5)
+            return execute(sql, params, many, context)
+
+        def void():
+            with connections[ORG_ALIAS].execute_wrapper(slow_fund_write):
+                _request("post", "/api/transactions/t0/void", {"reason": "dup"},
+                         self.token, results, errors)
+
+        results, errors = [], []
+        credit = {"type": "credit", "amount": 5, "mode": "cash", "date": timezone.now().isoformat()}
+        threads = [
+            threading.Thread(target=void),
+            threading.Thread(target=_request, args=(
+                "post", "/api/databases/f1/transactions", credit, self.token, results, errors,
+                lambda: void_has_read.wait(timeout=5),
+            )),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+
+        self.assertEqual(errors, [], f"threads raised: {errors}")
+        self.assertEqual([r.status_code for r in results], [200, 200])
+        self.assertEqual(self._fund_balance(), 5.0, "the void overwrote the concurrent credit")
+        with org_context(ORG_ALIAS):
+            credit_row = TransactionFund.objects.get(database_id="f1", amount=5.0)
+        self.assertEqual(credit_row.running_balance, 5.0)

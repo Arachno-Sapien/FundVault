@@ -1,4 +1,5 @@
 import json
+import math
 import random
 import string
 from urllib.parse import parse_qs
@@ -46,9 +47,28 @@ def parse_body(request):
     if not request.body:
         return {}
     try:
-        return json.loads(request.body.decode("utf-8"))
+        data = json.loads(request.body.decode("utf-8"))
     except json.JSONDecodeError:
         return {}
+    # Views call .get() on the result, so a JSON array or scalar body is
+    # treated as empty and fails their own "required" checks with a 400.
+    return data if isinstance(data, dict) else {}
+
+
+def parse_number(value):
+    """A finite float from request input, or None.
+
+    Bare float() accepts "nan" and "inf", which slip past `amount <= 0` checks
+    and turn a fund's balance (and the org's JSON responses) into NaN. JSON
+    true/false are refused too rather than read as 1/0.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def json_error(message, status=400):
