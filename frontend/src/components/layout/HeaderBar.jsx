@@ -9,6 +9,7 @@ export default function HeaderBar({
   onOpenUserManagement,
   onOpenProfile,
   onOpenOrgSettings,
+  onOpenJoinCodes,
   onClearCache,
   userDropdownOpen,
   setUserDropdownOpen
@@ -67,6 +68,17 @@ export default function HeaderBar({
                   }}
                 >
                   🛡️ Manage Users
+                </button>
+              )}
+              {canManageUsers && (
+                <button
+                  className="user-dropdown-item"
+                  onClick={() => {
+                    setUserDropdownOpen(false);
+                    onOpenJoinCodes();
+                  }}
+                >
+                  🎟️ Invite members
                 </button>
               )}
               {canManageOrgConfig && (

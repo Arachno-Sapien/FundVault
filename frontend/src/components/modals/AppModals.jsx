@@ -5,6 +5,7 @@ import { ACTIONS, can } from "lib/permissions";
 import { extractReceipt } from "lib/api";
 import Modal from "components/modals/Modal";
 import OrgSettingsModal from "components/modals/OrgSettingsModal";
+import JoinCodesModal from "components/modals/JoinCodesModal";
 
 // Extraction costs the organisation money, so an identical image submitted
 // twice in one session reuses its result rather than paying again.
@@ -882,6 +883,14 @@ export default function AppModals({
         onClose={() => close("orgSettings")}
         request={actions.request}
         toast={actions.toast}
+      />
+
+      <JoinCodesModal
+        open={modals.joinCodes}
+        onClose={() => close("joinCodes")}
+        request={actions.request}
+        toast={actions.toast}
+        currentUser={state.currentUser}
       />
     </>
   );

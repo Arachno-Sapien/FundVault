@@ -97,7 +97,8 @@ export default function FundVaultApp() {
     profile: false,
     userManagement: false,
     shortcuts: false,
-    orgSettings: false
+    orgSettings: false,
+    joinCodes: false
   });
 
   // `restored` gates rendering until localStorage has been read, so a signed-in
@@ -217,11 +218,24 @@ export default function FundVaultApp() {
       setProfileForm(prev => ({ ...prev, profileImage: "" }));
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      setProfileForm(prev => ({ ...prev, profileImage: String(reader.result || "") }));
+    // Stored on the user row and sent with every login and /auth/me response,
+    // so shrink it to avatar size first (~20 KB instead of megabytes).
+    const url = URL.createObjectURL(file);
+    const img = new window.Image();
+    img.onload = () => {
+      const scale = Math.min(1, 256 / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      setProfileForm(prev => ({ ...prev, profileImage: canvas.toDataURL("image/jpeg", 0.85) }));
     };
-    reader.readAsDataURL(file);
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      toast("That file is not a readable image", "error");
+    };
+    img.src = url;
   };
 
   const saveProfile = async () => {
@@ -998,6 +1012,7 @@ export default function FundVaultApp() {
         }}
         onOpenProfile={openProfileModal}
         onOpenOrgSettings={() => setModals(prev => ({ ...prev, orgSettings: true }))}
+        onOpenJoinCodes={() => setModals(prev => ({ ...prev, joinCodes: true }))}
         onClearCache={clearCache}
         userDropdownOpen={userDropdownOpen}
         setUserDropdownOpen={setUserDropdownOpen}
