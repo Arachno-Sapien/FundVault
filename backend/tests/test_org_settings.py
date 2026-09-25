@@ -1,42 +1,13 @@
 import json
-from datetime import timedelta
 from unittest import mock
 
 from django.test import Client, TestCase
-from django.utils import timezone
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
-from apps.orgs.connections import alias_for_org, ensure_connection
-from apps.orgs.context import org_context
 from apps.orgs.models import Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# The middleware resolves org "o1" to this alias at request time (see
-# apps.orgs.connections.alias_for_org), not to the static "tenant_dev" alias —
-# each org gets its own dynamically-registered connection. Django's per-test
-# database allowlist is computed before any test's setUp runs, so the alias
-# must already exist at import time (see tests/test_org_middleware.py, which
-# established this pattern, and tests/test_ledger_permissions.py which follows
-# it). All fixture writes below go through this alias, matching what the HTTP
-# requests will actually use once OrgContextMiddleware resolves org "o1".
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import OrgTestMixin, TENANT_URL
 
 
-class OrgSettingsTests(TestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        # Re-register in case an unrelated test's connection churn (the LRU
-        # cap in apps.orgs.connections is process-wide) evicted it between
-        # module import and here — see test_org_middleware.py's identical
-        # safeguard.
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class OrgSettingsTests(OrgTestMixin, TestCase):
     def setUp(self):
         self.client = Client()
         Org.objects.create(
@@ -51,21 +22,8 @@ class OrgSettingsTests(TestCase):
                 }
             }),
         )
-        self.owner = self._user("u_owner", "owner")
-        self.admin = self._user("u_admin", "admin")
-
-    def _user(self, user_id, role):
-        token = create_session_token(user_id, "o1")
-        with org_context(ORG_ALIAS):
-            User.objects.create(
-                id=user_id, username=user_id, email=f"{user_id}@example.com",
-                password_hash="x", role=role, is_active=True,
-            )
-            Session.objects.create(
-                id=f"s_{user_id}", user_id=user_id, token=token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
-        return token
+        self.owner = self.make_user("u_owner", "owner")
+        self.admin = self.make_user("u_admin", "admin")
 
     def test_owner_sees_masked_keys_only(self):
         response = self.client.get(
@@ -118,31 +76,14 @@ BLOCKED_URLS = (
 )
 
 
-class OutboundTargetTests(TestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class OutboundTargetTests(OrgTestMixin, TestCase):
     def setUp(self):
         self.client = Client()
         Org.objects.create(
             id="o1", name="Acme", slug="acme", owner_email="o@example.com",
             db_connection=TENANT_URL,
         )
-        token = create_session_token("u_owner", "o1")
-        with org_context(ORG_ALIAS):
-            User.objects.create(
-                id="u_owner", username="u_owner", email="owner@example.com",
-                password_hash="x", role="owner", is_active=True,
-            )
-            Session.objects.create(
-                id="s_owner", user_id="u_owner", token=token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
-        self.owner = token
+        self.owner = self.make_user("u_owner", "owner", email="owner@example.com")
 
     def _put(self, payload):
         # Patch the two SDK entry points so a regression that lets the target
