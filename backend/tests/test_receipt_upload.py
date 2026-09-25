@@ -1,30 +1,16 @@
 import io
 import json
-from datetime import timedelta
 from unittest import mock
 
 from django.test import Client, TestCase
 from django.utils import timezone
 from PIL import Image
 
-from apps.accounts.models import Session, User
-from apps.common.auth import create_session_token
+from apps.accounts.models import User
 from apps.ledger.models import DatabaseFund, TransactionFund, TrashItem
-from apps.orgs.connections import alias_for_org, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
-
-TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev"
-
-# The middleware resolves org "o1" to this alias at request time (see
-# apps.orgs.connections.alias_for_org), not to the static "tenant_dev" alias —
-# each org gets its own dynamically-registered connection, even when (as in
-# dev/tests) it happens to point at the same physical database. Django computes
-# its per-test database allowlist once, before any test's setUp runs, so the
-# alias must already be real by then, not just a name in `databases` (see
-# tests.test_org_middleware for the same pattern).
-ORG_ALIAS = alias_for_org("o1")
-ensure_connection(Org(id="o1", db_connection=TENANT_URL))
+from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 STORAGE_CONFIG = json.dumps(
     {
@@ -45,34 +31,15 @@ def _png(size=(64, 64)):
     return buf
 
 
-class ReceiptUploadTests(TestCase):
-    databases = {"default", ORG_ALIAS}
-
-    @classmethod
-    def setUpClass(cls):
-        # ORG_ALIAS shares the connection registry's module-level LRU with
-        # every other test that registers tenant connections — when the full
-        # suite runs, an unrelated test filling that cache can evict it
-        # between module import and here. Re-register immediately.
-        ensure_connection(Org(id="o1", db_connection=TENANT_URL))
-        super().setUpClass()
-
+class ReceiptUploadTests(OrgTestMixin, TestCase):
     def setUp(self):
         self.client = Client()
         self.org = Org.objects.create(
             id="o1", name="Acme", slug="acme",
             owner_email="o@example.com", db_connection=TENANT_URL,
         )  # storage_config deliberately blank
-        self.token = create_session_token("u1", "o1")
+        self.token = self.make_user("u1", User.Role.ADMIN, username="alice", email="a@example.com")
         with org_context(ORG_ALIAS):
-            User.objects.create(
-                id="u1", username="alice", email="a@example.com",
-                password_hash="x", role=User.Role.ADMIN, is_active=True,
-            )
-            Session.objects.create(
-                id="s1", user_id="u1", token=self.token,
-                expires_at=timezone.now() + timedelta(hours=1),
-            )
             DatabaseFund.objects.create(id="f1", name="Fund", balance=100.0, created_by_id="u1")
             TransactionFund.objects.create(
                 id="t1", database_id="f1", type="credit", amount=10.0,
