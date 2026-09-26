@@ -726,53 +726,60 @@ export default function AppModals({
           ))}
         </div>
 
-        <div className="section-label" style={{ marginBottom: 8 }}>
-          Add Recurring Transaction
-        </div>
-        <div className="type-selector" style={{ marginBottom: 16 }}>
-          <button
-            className={`type-btn credit-hover ${state.recurringForm.type === "credit" ? "active credit" : ""}`}
-            onClick={() => actions.setRecurringForm(prev => ({ ...prev, type: "credit" }))}
-          >
-            ▲ Credit
-          </button>
-          <button
-            className={`type-btn debit-hover ${state.recurringForm.type === "debit" ? "active debit" : ""}`}
-            onClick={() => actions.setRecurringForm(prev => ({ ...prev, type: "debit" }))}
-          >
-            ▼ Debit
-          </button>
-        </div>
-        <div className="form-row">
-          <div className="form-group">
-            <label>Amount (₹)</label>
-            <input type="number" value={state.recurringForm.amount} onChange={e => actions.setRecurringForm(prev => ({ ...prev, amount: e.target.value }))} />
-          </div>
-          <div className="form-group">
-            <label>Frequency</label>
-            <select value={state.recurringForm.frequency} onChange={e => actions.setRecurringForm(prev => ({ ...prev, frequency: e.target.value }))}>
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
-              <option value="yearly">Yearly</option>
-            </select>
-          </div>
-        </div>
-        <div className="form-row">
-          <div className="form-group">
-            <label>Description</label>
-            <input value={state.recurringForm.description} onChange={e => actions.setRecurringForm(prev => ({ ...prev, description: e.target.value }))} />
-          </div>
-          <div className="form-group">
-            <label>Start Date</label>
-            <input type="date" value={state.recurringForm.nextRun} onChange={e => actions.setRecurringForm(prev => ({ ...prev, nextRun: e.target.value }))} />
-          </div>
-        </div>
-        <div className="form-actions">
-          <button className="btn btn-primary" onClick={actions.addRecurring}>
-            Add Recurring →
-          </button>
-        </div>
+        {/* The backend refuses to create a recurring rule on an archived fund
+            (deleting one is still allowed above), so hide the add form there
+            instead of letting the request fail. */}
+        {!state.currentDb?.is_archived && (
+          <>
+            <div className="section-label" style={{ marginBottom: 8 }}>
+              Add Recurring Transaction
+            </div>
+            <div className="type-selector" style={{ marginBottom: 16 }}>
+              <button
+                className={`type-btn credit-hover ${state.recurringForm.type === "credit" ? "active credit" : ""}`}
+                onClick={() => actions.setRecurringForm(prev => ({ ...prev, type: "credit" }))}
+              >
+                ▲ Credit
+              </button>
+              <button
+                className={`type-btn debit-hover ${state.recurringForm.type === "debit" ? "active debit" : ""}`}
+                onClick={() => actions.setRecurringForm(prev => ({ ...prev, type: "debit" }))}
+              >
+                ▼ Debit
+              </button>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>Amount (₹)</label>
+                <input type="number" value={state.recurringForm.amount} onChange={e => actions.setRecurringForm(prev => ({ ...prev, amount: e.target.value }))} />
+              </div>
+              <div className="form-group">
+                <label>Frequency</label>
+                <select value={state.recurringForm.frequency} onChange={e => actions.setRecurringForm(prev => ({ ...prev, frequency: e.target.value }))}>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="yearly">Yearly</option>
+                </select>
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>Description</label>
+                <input value={state.recurringForm.description} onChange={e => actions.setRecurringForm(prev => ({ ...prev, description: e.target.value }))} />
+              </div>
+              <div className="form-group">
+                <label>Start Date</label>
+                <input type="date" value={state.recurringForm.nextRun} onChange={e => actions.setRecurringForm(prev => ({ ...prev, nextRun: e.target.value }))} />
+              </div>
+            </div>
+            <div className="form-actions">
+              <button className="btn btn-primary" onClick={actions.addRecurring}>
+                Add Recurring →
+              </button>
+            </div>
+          </>
+        )}
       </Modal>
 
       <Modal open={modals.export} id="exportModal" title="Export Data" onClose={() => close("export")}>
