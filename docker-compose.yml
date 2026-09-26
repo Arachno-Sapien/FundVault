@@ -1,5 +1,6 @@
-# Development databases only. Production uses managed Postgres (Render for the
-# control plane, the org's own provider for each tenant).
+# Development databases only. Production uses a non-expiring Postgres such as
+# Neon for the control plane (see README Deployment) and the org's own
+# provider for each tenant.
 services:
   controlplane:
     image: postgres:16-alpine

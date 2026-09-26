@@ -73,7 +73,7 @@ echo.
 
 echo [3/3] Installing backend dependencies (Django, AI APIs, Pillow)...
 echo This may take a few moments...
-pip install -r backend\requirements.txt --quiet
+python -m pip install -r backend\requirements.txt --quiet
 if %ERRORLEVEL% neq 0 (
     echo ERROR: Backend pip install failed.
     echo Please check your Python installation and internet connection.
