@@ -1,6 +1,6 @@
 import io
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest import mock
 
 from PIL import Image
@@ -12,8 +12,8 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.accounts.models import User
-from apps.ledger.models import DatabaseFund, RecurringTransaction, TransactionFund
-from apps.ledger.services import process_due_recurring
+from apps.ledger.models import DatabaseFund, RecurringTransaction, TransactionFund, TrashItem
+from apps.ledger.services import next_recurring_date, process_due_recurring
 from apps.orgs.context import org_context
 from apps.orgs.models import Org
 from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
@@ -94,6 +94,35 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
         body = response.json()
         self.assertEqual(body["totalBalance"], 0.3)
         self.assertEqual(body["totalCredits"], 0.3)
+
+    def test_overview_totals_exclude_pending_unapproved_rows(self):
+        # The fund's own balance only ever moves on approval, so counting a
+        # pending debit/credit in totalCredits/totalDebits (while balance
+        # ignores it) makes the overview's own numbers disagree with each other.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="f1", name="Fund 1", balance=100.0, created_by_id="u_owner")
+            now = timezone.now()
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=100.0,
+                date=now, mode="cash", running_balance=100.0,
+                approved=True, requires_approval=False,
+            )
+            TransactionFund.objects.create(
+                id="t2", database_id="f1", type="credit", amount=500.0,
+                date=now, mode="cash", running_balance=100.0,
+                approved=False, requires_approval=True,
+            )
+            TransactionFund.objects.create(
+                id="t3", database_id="f1", type="debit", amount=50.0,
+                date=now, mode="cash", running_balance=100.0,
+                approved=False, requires_approval=True,
+            )
+        response = self.client.get("/api/analytics/overview", **self.owner_auth)
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertEqual(body["totalBalance"], 100.0)
+        self.assertEqual(body["totalCredits"], 100.0)
+        self.assertEqual(body["totalDebits"], 0.0)
 
     def test_merge_locks_both_funds_before_reading_their_transactions(self):
         # A transaction posted to either fund during the merge must serialize
@@ -351,3 +380,119 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
                 DatabaseFund.objects.filter(is_archived=False, is_deleted=False).values_list("name", "balance")
             )
         self.assertEqual(live, [("Merged", 150.0)])
+
+    def test_merge_records_merged_into_on_both_source_and_target(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="src", name="Source", created_by_id="u_owner")
+            DatabaseFund.objects.create(id="tgt", name="Target", created_by_id="u_owner")
+        response = self.client.post(
+            "/api/databases/merge",
+            data=json.dumps({"sourceId": "src", "targetId": "tgt", "name": "Merged"}),
+            content_type="application/json", **self.owner_auth,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        merged_id = response.json()["id"]
+        with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="src").merged_into_id, merged_id)
+            self.assertEqual(DatabaseFund.objects.get(id="tgt").merged_into_id, merged_id)
+
+    def test_unarchiving_a_merge_source_is_refused(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="src", name="Source", created_by_id="u_owner")
+            DatabaseFund.objects.create(id="tgt", name="Target", created_by_id="u_owner")
+        merge_response = self.client.post(
+            "/api/databases/merge",
+            data=json.dumps({"sourceId": "src", "targetId": "tgt", "name": "Merged Fund"}),
+            content_type="application/json", **self.owner_auth,
+        )
+        self.assertEqual(merge_response.status_code, 200, merge_response.content)
+
+        response = self.client.post("/api/databases/src/archive", **self.owner_auth)
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(
+            response.json()["error"],
+            "This fund was merged into Merged Fund; delete that fund to undo the merge",
+        )
+        with org_context(ORG_ALIAS):
+            self.assertTrue(DatabaseFund.objects.get(id="src").is_archived)
+
+    def test_unarchiving_a_merge_source_is_allowed_once_the_merged_fund_is_deleted(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="src", name="Source", created_by_id="u_owner")
+            DatabaseFund.objects.create(id="tgt", name="Target", created_by_id="u_owner")
+        merge_response = self.client.post(
+            "/api/databases/merge",
+            data=json.dumps({"sourceId": "src", "targetId": "tgt", "name": "Merged Fund"}),
+            content_type="application/json", **self.owner_auth,
+        )
+        merged_id = merge_response.json()["id"]
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.filter(id=merged_id).update(is_deleted=True)
+
+        response = self.client.post("/api/databases/src/archive", **self.owner_auth)
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(response.json()["is_archived"])
+
+    def test_a_plain_archived_fund_still_unarchives_normally(self):
+        # merged_into is null for an ordinary archive/unarchive -- the new
+        # guard must not get in the way of that unrelated, existing flow.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="f1", name="Fund", is_archived=True, created_by_id="u_owner")
+        response = self.client.post("/api/databases/f1/archive", **self.owner_auth)
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(response.json()["is_archived"])
+
+    def test_permanently_deleting_a_stale_trash_item_after_restore_leaves_the_fund_alone(self):
+        # A stale TrashItem -- fetched by one request before another request's
+        # restore commits -- must not be able to hard-delete a fund that is
+        # live again by the time the delete actually runs.
+        from apps.ledger.views import _delete_trash_item_permanently
+
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(
+                id="f1", name="Fund", balance=10.0, is_deleted=True, created_by_id="u_owner",
+            )
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=10.0,
+                date=timezone.now(), mode="cash", running_balance=10.0,
+            )
+            stale_item = TrashItem.objects.create(
+                id="tr1", entity_type="database",
+                entity_data=json.dumps({"id": "f1"}), deleted_by_id="u_owner",
+            )
+
+        restore_response = self.client.post("/api/trash/tr1/restore", **self.owner_auth)
+        self.assertEqual(restore_response.status_code, 200, restore_response.content)
+
+        with org_context(ORG_ALIAS):
+            _delete_trash_item_permanently(None, stale_item)
+
+        with org_context(ORG_ALIAS):
+            self.assertTrue(DatabaseFund.objects.filter(id="f1", is_deleted=False).exists())
+            self.assertTrue(TransactionFund.objects.filter(id="t1").exists())
+            self.assertFalse(TrashItem.objects.filter(id="tr1").exists())
+
+    def test_yearly_recurrence_from_feb_29_clamps_to_feb_28(self):
+        self.assertEqual(next_recurring_date(date(2024, 2, 29), "yearly"), date(2025, 2, 28))
+        self.assertEqual(next_recurring_date(date(2020, 2, 29), "yearly"), date(2021, 2, 28))
+        # An ordinary date is unaffected.
+        self.assertEqual(next_recurring_date(date(2023, 6, 15), "yearly"), date(2024, 6, 15))
+
+    def test_process_due_recurring_survives_a_feb_29_yearly_rule(self):
+        # Before the clamp, current_date.replace(year=...) raised ValueError
+        # for this rule, which rolled back the whole atomic block -- so this
+        # rule, and every other due rule in the same call, silently never
+        # posted again.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="f1", name="Fund", balance=0.0, created_by_id="u_owner")
+            RecurringTransaction.objects.create(
+                id="r1", database_id="f1", type="credit", amount=50.0,
+                frequency="yearly", description="anniversary bonus",
+                next_run=date(2024, 2, 29), is_active=True, created_by_id="u_owner",
+            )
+            owner = User.objects.get(id="u_owner")
+            created = process_due_recurring(owner)
+        self.assertEqual(len(created), 1)
+        with org_context(ORG_ALIAS):
+            self.assertEqual(RecurringTransaction.objects.get(id="r1").next_run, date(2025, 2, 28))
+            self.assertEqual(DatabaseFund.objects.get(id="f1").balance, 50.0)

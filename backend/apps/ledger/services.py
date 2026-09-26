@@ -1,3 +1,4 @@
+import calendar
 import json
 from datetime import timedelta
 
@@ -101,7 +102,15 @@ def next_recurring_date(current_date, frequency):
         day = min(current_date.day, 28)
         return current_date.replace(year=year, month=month, day=day)
     if frequency == "yearly":
-        return current_date.replace(year=current_date.year + 1)
+        # Clamp like the monthly branch above: Feb 29 has no equivalent in a
+        # non-leap next year, and a bare .replace(year=...) raises ValueError
+        # there -- which, uncaught, rolls back process_due_recurring's whole
+        # atomic block and takes every other due rule in the org down with it.
+        year = current_date.year + 1
+        day = current_date.day
+        if current_date.month == 2 and day == 29 and not calendar.isleap(year):
+            day = 28
+        return current_date.replace(year=year, day=day)
     return current_date
 
 

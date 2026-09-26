@@ -5,9 +5,13 @@ def _parse_mode_data(mode_data):
     if not mode_data:
         return {}
     try:
-        return json.loads(mode_data)
+        parsed = json.loads(mode_data)
     except (json.JSONDecodeError, TypeError):
         return {}
+    # A row stored before the create-side guard existed (or restored from an
+    # old trash/merge copy) can have a non-dict value baked in as JSON --
+    # never surface that to .get() callers below.
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def serialize_database(database):
@@ -21,6 +25,7 @@ def serialize_database(database):
         "approval_threshold": float(database.approval_threshold or 0),
         "is_archived": bool(database.is_archived),
         "is_deleted": bool(database.is_deleted),
+        "merged_into": database.merged_into_id,
         "created_at": database.created_at.isoformat() if database.created_at else None,
     }
 

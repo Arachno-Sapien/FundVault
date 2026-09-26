@@ -222,8 +222,10 @@ def databases_merge(request):
 
         source.is_archived = True
         target.is_archived = True
-        source.save(update_fields=["is_archived"])
-        target.save(update_fields=["is_archived"])
+        source.merged_into_id = merged.id
+        target.merged_into_id = merged.id
+        source.save(update_fields=["is_archived", "merged_into"])
+        target.save(update_fields=["is_archived", "merged_into"])
 
         # recalculate_running_balances writes the real balance via a queryset
         # .update(), which never touches this in-memory `merged` object -- use
@@ -305,6 +307,18 @@ def database_archive(request, database_id):
     db = _get_fund(database_id)
     if not db:
         return json_error("Database not found", 404)
+    if db.is_archived and db.merged_into_id:
+        # A merge archives its source and target and copies their rows into
+        # the merged fund. Unarchiving a merge source here would make it a
+        # live, writable fund again while its money still lives in the
+        # merged fund too -- refuse, unless that merged fund was itself
+        # deleted (then there is nothing left to double-count against).
+        merged_fund = DatabaseFund.objects.filter(id=db.merged_into_id, is_deleted=False).first()
+        if merged_fund:
+            return json_error(
+                f"This fund was merged into {merged_fund.name}; delete that fund to undo the merge",
+                400,
+            )
     db.is_archived = not db.is_archived
     db.save(update_fields=["is_archived"])
     add_audit(
@@ -347,7 +361,7 @@ def database_transactions(request, database_id):
     sender = str(body.get("sender", "")).strip()
     receiver = str(body.get("receiver", "")).strip()
     mode = str(body.get("mode", "")).strip()
-    mode_data = body.get("modeData") or {}
+    mode_data = body.get("modeData")
     location = str(body.get("location", "")).strip()
     notes = str(body.get("notes", "")).strip()
 
@@ -355,6 +369,14 @@ def database_transactions(request, database_id):
         return json_error("Invalid transaction type", 400)
     if mode not in ("electronic", "cheque", "cash"):
         return json_error("Invalid transaction mode", 400)
+    if mode_data is None:
+        mode_data = {}
+    elif not isinstance(mode_data, dict):
+        # json.dumps(mode_data) below would happily serialise a list/string/
+        # number too -- every later read of this fund's ledger (including the
+        # whole org's, through databases_merge's copy) would then 500 trying
+        # to .get() off whatever that decodes back into.
+        return json_error("Invalid mode data", 400)
     amount_error = _amount_error(amount)
     if amount_error:
         return amount_error
@@ -588,12 +610,10 @@ def transaction_update(request, transaction_id):
             return json_error("Transaction date is required", 400)
         tx_date = parsed_date
 
-    txn.amount = amount
-    txn.date = tx_date
-    txn.sender = str(body.get("sender", txn.sender or "")).strip() or None
-    txn.receiver = str(body.get("receiver", txn.receiver or "")).strip() or None
-    txn.location = str(body.get("location", txn.location or "")).strip() or None
-    txn.notes = str(body.get("notes", txn.notes or "")).strip() or None
+    sender = str(body.get("sender", txn.sender or "")).strip() or None
+    receiver = str(body.get("receiver", txn.receiver or "")).strip() or None
+    location = str(body.get("location", txn.location or "")).strip() or None
+    notes = str(body.get("notes", txn.notes or "")).strip() or None
     try:
         with transaction.atomic(using=current_org_alias()):
             fund = lock_fund(txn.database_id)
@@ -601,6 +621,22 @@ def transaction_update(request, transaction_id):
                 return json_error("Database not found", 404)
             if fund.is_archived:
                 return json_error("This fund is archived", 400)
+            # txn was read above without a lock, before the fund was locked.
+            # A void racing this edit in that window would otherwise be
+            # silently undone by the save below. Re-read it under its own
+            # row lock (fund first, then transaction, same order as every
+            # other money write) and re-check it hasn't been voided since.
+            txn = TransactionFund.objects.select_for_update().filter(id=transaction_id).first()
+            if not txn:
+                return json_error("Transaction not found", 404)
+            if txn.is_voided:
+                return json_error("Cannot edit a voided transaction", 400)
+            txn.amount = amount
+            txn.date = tx_date
+            txn.sender = sender
+            txn.receiver = receiver
+            txn.location = location
+            txn.notes = notes
             txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
             # Raising an approved debit's amount (or lowering an approved
             # credit's) can drive the fund negative with no other check --
@@ -642,7 +678,7 @@ def analytics_overview(request):
         count=Count("id"), balance=Sum("balance")
     )
     totals = TransactionFund.objects.filter(
-        database__is_deleted=False, database__is_archived=False, is_voided=False
+        database__is_deleted=False, database__is_archived=False, is_voided=False, approved=True,
     ).aggregate(
         credits=Sum("amount", filter=Q(type="credit")),
         debits=Sum("amount", filter=Q(type="debit")),
@@ -683,11 +719,18 @@ def _delete_trash_item_permanently(request, item):
         if item.entity_type == "database":
             data = json.loads(item.entity_data)
             db_id = data.get("id")
-            txns = TransactionFund.objects.filter(database_id=db_id)
-            _delete_receipts_on_commit(request, txns.values_list("receipt_key", flat=True))
-            RecurringTransaction.objects.filter(database_id=db_id).delete()
-            txns.delete()
-            DatabaseFund.objects.filter(id=db_id).delete()
+            # Lock the fund and only purge it if it is still the soft-deleted
+            # fund this trash item refers to. A stale TrashItem -- a
+            # double-submitted DELETE, or a restore that committed while this
+            # call was waiting on the lock -- must not hard-delete a fund that
+            # is live again; just drop the stale trash row instead.
+            fund = DatabaseFund.objects.select_for_update().filter(id=db_id, is_deleted=True).first()
+            if fund:
+                txns = TransactionFund.objects.filter(database_id=db_id)
+                _delete_receipts_on_commit(request, txns.values_list("receipt_key", flat=True))
+                RecurringTransaction.objects.filter(database_id=db_id).delete()
+                txns.delete()
+                fund.delete()
         item.delete()
 
 

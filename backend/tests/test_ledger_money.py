@@ -377,6 +377,79 @@ class LedgerMoneyTests(OrgTestMixin, TestCase):
         with org_context(ORG_ALIAS):
             self.assertFalse(RecurringTransaction.objects.exists())
 
+    def test_non_object_mode_data_is_400(self):
+        for bad in (["a", "b"], "a string", 5, True):
+            with self.subTest(bad=bad):
+                response = self._send("post", "/api/databases/f1/transactions", {
+                    "type": "credit", "amount": 10, "mode": "cash",
+                    "date": timezone.now().isoformat(), "modeData": bad,
+                })
+                self.assertEqual(response.status_code, 400, response.content)
+                self.assertEqual(response.json()["error"], "Invalid mode data")
+        with org_context(ORG_ALIAS):
+            self.assertFalse(TransactionFund.objects.filter(database_id="f1").exists())
+        self.assertEqual(self._fund().balance, 0.0)
+
+    def test_absent_or_null_mode_data_defaults_to_empty_object(self):
+        base = {"type": "credit", "amount": 10, "mode": "cash", "date": timezone.now().isoformat()}
+        for label, body in (("absent", dict(base)), ("null", dict(base, modeData=None))):
+            with self.subTest(label=label):
+                response = self._send("post", "/api/databases/f1/transactions", body)
+                self.assertEqual(response.status_code, 200, response.content)
+                self.assertEqual(response.json()["transaction"]["mode_data"], {})
+
+    def test_a_row_with_bad_mode_data_already_stored_reads_back_as_empty_object(self):
+        # A row written before this guard existed (or copied by an old merge)
+        # can have non-dict JSON baked into mode_data -- reading it back must
+        # not 500 every later GET of this fund (or the whole org's, via
+        # database_transactions/database_detail) forever.
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=10.0,
+                date=timezone.now(), mode="cash", running_balance=10.0,
+                mode_data=json.dumps(["not", "a", "dict"]),
+            )
+        response = self.client.get("/api/databases/f1/transactions", **self.auth)
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()[0]["mode_data"], {})
+        response = self.client.get("/api/databases/f1", **self.auth)
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["transactions"][0]["mode_data"], {})
+
+    def test_update_re_checks_the_transaction_under_lock(self):
+        # The view reads the transaction row before it takes the fund lock.
+        # If a void races that window and lands right before the lock is
+        # granted, saving the edit without re-checking would silently undo
+        # the void.
+        real_lock_fund = ledger_views.lock_fund
+
+        def void_then_lock(database_id):
+            fund = real_lock_fund(database_id)
+            TransactionFund.objects.filter(id="t1").update(
+                is_voided=True, void_reason="raced void",
+                voided_by="someone", voided_at=timezone.now(),
+            )
+            return fund
+
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="credit", amount=10.0,
+                date=timezone.now(), mode="cash", running_balance=10.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=10.0)
+
+        with mock.patch("apps.ledger.views.lock_fund", side_effect=void_then_lock):
+            response = self._send("put", "/api/transactions/t1", {"amount": 20.0})
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "Cannot edit a voided transaction")
+        with org_context(ORG_ALIAS):
+            txn = TransactionFund.objects.get(id="t1")
+        self.assertTrue(txn.is_voided)
+        self.assertEqual(txn.amount, 10.0)
+        self.assertEqual(self._fund().balance, 10.0)
+
     def test_cannot_delete_a_voided_transaction_in_an_archived_fund(self):
         with org_context(ORG_ALIAS):
             TransactionFund.objects.create(
