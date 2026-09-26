@@ -44,21 +44,31 @@ export default function OrgGateway({ onAuthenticated, onError }) {
   };
 
   return (
-    <div className="auth-shell">
-      <h1>FundVault</h1>
-      <div className="auth-tabs">
-        <button className={mode === "signin" ? "active" : ""} onClick={() => setMode("signin")}>
-          Sign in
-        </button>
-        <button className={mode === "join" ? "active" : ""} onClick={() => setMode("join")}>
-          Join with a code
-        </button>
-        <button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>
-          Create an organisation
-        </button>
-      </div>
+    <div className="auth-page">
+      <div className="auth-shell">
+        <div className="auth-brand">
+          <span className="auth-logo">
+            <span className="logo-icon">◈</span> FundVault
+          </span>
+          <p className="auth-tagline">
+            Create named fund databases, record detailed transactions, &amp; track live balances.
+          </p>
+        </div>
 
-      {mode === "signin" && (
+        <div className="auth-card">
+          <div className="auth-tabs">
+            <button className={mode === "signin" ? "active" : ""} onClick={() => setMode("signin")}>
+              Sign in
+            </button>
+            <button className={mode === "join" ? "active" : ""} onClick={() => setMode("join")}>
+              Join with a code
+            </button>
+            <button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>
+              Create an organisation
+            </button>
+          </div>
+
+          {mode === "signin" && (
         <div className="org-form">
           <label>Email</label>
           <input
@@ -124,8 +134,10 @@ export default function OrgGateway({ onAuthenticated, onError }) {
         </div>
       )}
 
-      {mode === "join" && <JoinOrgForm onJoined={onAuthenticated} onError={onError} />}
-      {mode === "create" && <CreateOrgForm onCreated={onAuthenticated} onError={onError} />}
+          {mode === "join" && <JoinOrgForm onJoined={onAuthenticated} onError={onError} />}
+          {mode === "create" && <CreateOrgForm onCreated={onAuthenticated} onError={onError} />}
+        </div>
+      </div>
     </div>
   );
 }
