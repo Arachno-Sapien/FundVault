@@ -442,9 +442,13 @@ code."
 The returned token is minted for `orgId` only — it will not authenticate
 against any other organisation.
 
+A body that isn't a JSON object (an array, string, number, or `null`) is
+treated the same as one with no `orgId` at all -- the normal 400 below, never
+a 500.
+
 **Error Responses:**
 
-- `400`: Choose an organisation first (missing `orgId`)
+- `400`: Choose an organisation first (missing `orgId`, or a non-object body)
 - `404`: Organisation not found
 - `401`: Invalid credentials
 - `403`: Account is inactive
@@ -621,9 +625,10 @@ this path; a `GET` here returns `405`.
 
 **DELETE** `/admin/users/<user_id>`
 
-Deletes the user and their sessions; their trash items are deleted and their
-audit log entries are kept with `user_id` cleared to `null` rather than
-deleted.
+Deletes the user and their sessions; their trash items are reassigned to the
+admin making this request (not deleted -- deleting them would leave whatever
+that user had soft-deleted unrestorable) and their audit log entries are kept
+with `user_id` cleared to `null` rather than deleted.
 
 **Response (200):**
 
@@ -723,6 +728,7 @@ open to any role, including Viewer.
     "approval_threshold": "float",
     "is_archived": "boolean",
     "is_deleted": "boolean",
+    "merged_into": "string or null (id of the fund this one was merged into, if any)",
     "created_at": "ISO 8601 datetime"
   }
 ]
@@ -780,6 +786,7 @@ open to any role, including Viewer.
   "approval_threshold": "float",
   "is_archived": "boolean",
   "is_deleted": "boolean",
+  "merged_into": "string or null (id of the fund this one was merged into, if any)",
   "created_at": "ISO 8601 datetime",
   "transactions": [ "see Transaction Endpoints for the shape" ]
 }
@@ -853,7 +860,13 @@ or restore.
 
 **POST** `/databases/<database_id>/archive`
 
-Toggles the archived flag.
+Toggles the archived flag. Unarchiving is refused for a fund whose
+`merged_into` points at a fund that still exists (is not itself deleted): a
+merge keeps the source and target's transactions for history but copies them
+into the merged fund too, so making a merge source live and writable again
+would double-count that money. Delete the merged fund first to undo the
+merge (once it's in trash, `merged_into` no longer points at a live fund and
+unarchiving goes through).
 
 **Response (200):**
 
@@ -863,6 +876,8 @@ Toggles the archived flag.
 
 **Error Responses:**
 
+- `400`: This fund was merged into `<merged fund name>`; delete that fund to
+  undo the merge
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Database not found
@@ -882,6 +897,10 @@ merge can never be left behind orphaned in a fund the merge is about to
 archive, and a double-submitted merge of the same pair (the second request
 serializes on the same lock) is refused instead of copying the money again
 into a second live fund.
+
+Both the source and target also have their `merged_into` set to the new
+merged fund's id (see [Archive/unarchive a database](#6-archiveunarchive-a-database)
+for why that matters).
 
 **Request Body:**
 
@@ -1006,6 +1025,12 @@ This no longer accepts `receiptImage` — a transaction is created without a
 receipt, then a receipt is attached separately with
 `POST /transactions/<id>/receipt`.
 
+`modeData`, if present, must be a JSON object — a list, string, number, or
+boolean is rejected with `400`, since it would otherwise be stored as-is and
+every later read of this transaction (and, through `databases_merge`, of the
+whole fund's copy in the merged database) would 500 trying to treat it as
+one. Omitting it, or sending `null`, is treated as `{}`.
+
 **Response (200):**
 
 ```json
@@ -1027,12 +1052,17 @@ receipt, then a receipt is attached separately with
 - For approved-on-creation transactions the balance updates immediately; for
   transactions pending approval it does not, until
   [approved](#5-approve-a-transaction).
-- A debit cannot take the balance negative.
+- A debit cannot take the balance negative. This only guards creation and
+  approval, though: voiding a credit has no balance check (voids are
+  corrections, never refused), so a fund can go negative on its own that way
+  — see [Update a transaction](#3-update-a-transaction) for what that means
+  for editing a transaction afterward.
 - An archived fund refuses every new transaction.
 
 **Error Responses:**
 
-- `400`: Invalid transaction type / Invalid transaction mode / Amount must be
+- `400`: Invalid transaction type / Invalid transaction mode / Invalid mode
+  data (`modeData` was present and not a JSON object) / Amount must be
   greater than 0 / Amount must be at most ₹1,000,000,000,000 / Transaction
   date is required / Insufficient balance / This fund is archived
 - `401`: Unauthorized
@@ -1047,9 +1077,13 @@ receipt, then a receipt is attached separately with
 **PUT** `/transactions/<transaction_id>`
 
 Cannot edit a voided transaction. Editing the amount or date recalculates
-running balances for the whole fund. If the edit (e.g. raising an approved
-debit's amount, or lowering an approved credit's) would drive the fund's
-balance below 0, the whole edit is rejected and nothing changes.
+running balances for the whole fund. The edit is refused only when it would
+make the fund's balance *worse* than it already is (comparing the
+recalculated balance against the fund's current one) — not merely negative.
+A fund can already be negative on its own (voiding a spent credit has no
+balance check), and in that case a notes-only edit, or an amount edit that
+raises the balance while leaving it negative, still goes through; only an
+edit that lowers it further is rejected.
 
 **Request Body:**
 
@@ -1484,6 +1518,12 @@ any receipt images they referenced are removed from the org's object storage
 after commit, unless another row still references the same key (best-effort;
 a storage failure does not fail the request).
 
+The fund is locked and re-checked as still soft-deleted immediately before
+the purge. If it was restored (`POST /trash/<item_id>/restore`) in the
+window before this ran -- a stale trash item from a double-submitted delete,
+or a restore racing this call -- the fund and its transactions are left
+alone; only the stale trash row itself is removed.
+
 **Response (200):**
 
 ```json
@@ -1534,14 +1574,19 @@ but keep their balances and rows for history, so archived funds and their
 transactions are excluded here -- otherwise that money would be counted
 twice, once on the archived originals and once on the merged fund.
 
+`totalCredits`/`totalDebits` only count *approved* transactions, matching
+`totalBalance` (a fund's balance only ever moves when a transaction is
+approved) -- a pending transaction awaiting approval is excluded from both
+until it's approved.
+
 **Response (200):**
 
 ```json
 {
   "totalDatabases": "integer",
   "totalBalance": "float, rounded to 2dp (sum of all non-deleted, non-archived funds' balances)",
-  "totalCredits": "float, rounded to 2dp (sum of all non-voided credit transactions in non-archived funds)",
-  "totalDebits": "float, rounded to 2dp (sum of all non-voided debit transactions in non-archived funds)"
+  "totalCredits": "float, rounded to 2dp (sum of approved, non-voided credit transactions in non-archived funds)",
+  "totalDebits": "float, rounded to 2dp (sum of approved, non-voided debit transactions in non-archived funds)"
 }
 ```
 
