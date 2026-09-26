@@ -6,7 +6,6 @@ from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.orgs.connections import drop_connection, ensure_connection
-from apps.orgs.context import org_context
 from apps.orgs.models import EmailIndex, JoinCode, Org, new_join_code
 from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
@@ -169,6 +168,19 @@ class CodeManagementTests(OrgTestMixin, TestCase):
     def test_minted_code_is_shaped_correctly(self):
         response = self._mint(self.owner_token)
         self.assertRegex(json.loads(response.content)["code"], r"^FUNDVAULT-")
+
+    def test_mint_with_an_overflowing_max_uses_is_400(self):
+        # 1e309 overflows a float's range to inf (json round-trips this as
+        # "Infinity"); int(inf) raises OverflowError, which must be caught
+        # alongside TypeError/ValueError instead of bubbling into a 500.
+        response = self.client.post(
+            "/api/orgs/codes",
+            data=json.dumps({"role": "member", "maxUses": 1e309}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.owner_token}",
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "maxUses and expiresInDays must be numbers")
 
     def test_owner_role_cannot_be_granted_by_a_code(self):
         response = self._mint(self.owner_token, "owner")

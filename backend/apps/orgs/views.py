@@ -237,7 +237,9 @@ def join_codes(request):
     try:
         max_uses = max(1, min(int(body.get("maxUses", 1)), 100))
         days = max(1, min(int(body.get("expiresInDays", 14)), 90))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # A JSON number that overflows a float (e.g. 1e309) parses to inf,
+        # and int(inf) raises OverflowError rather than ValueError.
         return json_error("maxUses and expiresInDays must be numbers", 400)
 
     code = JoinCode.objects.create(
