@@ -282,6 +282,63 @@ class LedgerMoneyTests(OrgTestMixin, TestCase):
             self.assertEqual(TransactionFund.objects.get(id="t1").amount, 10.0)
         self.assertEqual(self._fund().balance, 10.0)
 
+    def test_update_refuses_a_balance_going_negative(self):
+        # Raising an approved debit's amount with no balance check would
+        # drive the fund negative in one PUT.
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t0", database_id="f1", type="credit", amount=100.0,
+                date=timezone.now() - timedelta(days=1), mode="cash", running_balance=100.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="debit", amount=30.0,
+                date=timezone.now(), mode="cash", running_balance=70.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=70.0)
+        response = self._send("put", "/api/transactions/t1", {"amount": 200.0})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "Insufficient balance for this change")
+        with org_context(ORG_ALIAS):
+            txn = TransactionFund.objects.get(id="t1")
+        self.assertEqual(txn.amount, 30.0)
+        self.assertEqual(txn.running_balance, 70.0)
+        self.assertEqual(self._fund().balance, 70.0)
+
+    def test_update_still_works_for_a_valid_edit(self):
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t0", database_id="f1", type="credit", amount=100.0,
+                date=timezone.now() - timedelta(days=1), mode="cash", running_balance=100.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="debit", amount=30.0,
+                date=timezone.now(), mode="cash", running_balance=70.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=70.0)
+        response = self._send("put", "/api/transactions/t1", {"amount": 40.0})
+        self.assertEqual(response.status_code, 200, response.content)
+        with org_context(ORG_ALIAS):
+            txn = TransactionFund.objects.get(id="t1")
+        self.assertEqual(txn.amount, 40.0)
+        self.assertEqual(txn.running_balance, 60.0)
+        self.assertEqual(self._fund().balance, 60.0)
+
+    def test_recurring_create_refuses_an_archived_fund(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.filter(id="f1").update(is_archived=True)
+        response = self._send("post", "/api/databases/f1/recurring", {
+            "type": "credit", "amount": 10, "frequency": "monthly",
+            "description": "rent", "nextRun": "2030-01-01",
+        })
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "This fund is archived")
+        with org_context(ORG_ALIAS):
+            self.assertFalse(RecurringTransaction.objects.exists())
+
     def test_cannot_delete_a_voided_transaction_in_an_archived_fund(self):
         with org_context(ORG_ALIAS):
             TransactionFund.objects.create(

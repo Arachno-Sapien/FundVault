@@ -131,6 +131,36 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
         self.assertIn("aaa_target", sql_statements[lock_indexes[0]])
         self.assertIn("zzz_source", sql_statements[lock_indexes[1]])
 
+    def test_overview_excludes_archived_funds_after_a_merge(self):
+        # databases_merge archives the source and target but keeps their
+        # balances and rows (for history); the overview must not count that
+        # archived money on top of the new merged fund's copy of it.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="src", name="Source", balance=100.0, created_by_id="u_owner")
+            DatabaseFund.objects.create(id="tgt", name="Target", balance=50.0, created_by_id="u_owner")
+            now = timezone.now()
+            TransactionFund.objects.create(
+                id="t1", database_id="src", type="credit", amount=100.0,
+                date=now, mode="cash", running_balance=100.0,
+            )
+            TransactionFund.objects.create(
+                id="t2", database_id="tgt", type="credit", amount=50.0,
+                date=now, mode="cash", running_balance=50.0,
+            )
+        response = self.client.post(
+            "/api/databases/merge",
+            data=json.dumps({"sourceId": "src", "targetId": "tgt", "name": "Merged"}),
+            content_type="application/json", **self.owner_auth,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+
+        response = self.client.get("/api/analytics/overview", **self.owner_auth)
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertEqual(body["totalDatabases"], 1)
+        self.assertEqual(body["totalBalance"], 150.0)
+        self.assertEqual(body["totalCredits"], 150.0)
+
     def test_overview_with_no_funds_has_the_same_four_keys(self):
         response = self.client.get("/api/analytics/overview", **self.owner_auth)
         self.assertEqual(response.status_code, 200)

@@ -594,14 +594,22 @@ def transaction_update(request, transaction_id):
     txn.receiver = str(body.get("receiver", txn.receiver or "")).strip() or None
     txn.location = str(body.get("location", txn.location or "")).strip() or None
     txn.notes = str(body.get("notes", txn.notes or "")).strip() or None
-    with transaction.atomic(using=current_org_alias()):
-        fund = lock_fund(txn.database_id)
-        if not fund or fund.is_deleted:
-            return json_error("Database not found", 404)
-        if fund.is_archived:
-            return json_error("This fund is archived", 400)
-        txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
-        recalculate_running_balances(txn.database_id)
+    try:
+        with transaction.atomic(using=current_org_alias()):
+            fund = lock_fund(txn.database_id)
+            if not fund or fund.is_deleted:
+                return json_error("Database not found", 404)
+            if fund.is_archived:
+                return json_error("This fund is archived", 400)
+            txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
+            # Raising an approved debit's amount (or lowering an approved
+            # credit's) can drive the fund negative with no other check --
+            # raise inside the atomic block so the save above and the
+            # recalculation both roll back together.
+            if recalculate_running_balances(txn.database_id) < 0:
+                raise InsufficientBalance()
+    except InsufficientBalance:
+        return json_error("Insufficient balance for this change", 400)
     add_audit(request.fv_user.id, "update", "transaction", txn.id, "Transaction edited")
     return JsonResponse(serialize_transaction(txn, _storage_for(request)))
 
@@ -621,8 +629,16 @@ def analytics_overview(request):
     if request.method != "GET":
         return json_error("Method not allowed", 405)
 
-    funds = DatabaseFund.objects.filter(is_deleted=False).aggregate(count=Count("id"), balance=Sum("balance"))
-    totals = TransactionFund.objects.filter(database__is_deleted=False, is_voided=False).aggregate(
+    # A merge archives its source and target (keeping their balances and rows
+    # for history) and copies their transactions into a new merged fund, so
+    # counting archived funds here would double-count that money on top of
+    # the merged fund's copy of it.
+    funds = DatabaseFund.objects.filter(is_deleted=False, is_archived=False).aggregate(
+        count=Count("id"), balance=Sum("balance")
+    )
+    totals = TransactionFund.objects.filter(
+        database__is_deleted=False, database__is_archived=False, is_voided=False
+    ).aggregate(
         credits=Sum("amount", filter=Q(type="credit")),
         debits=Sum("amount", filter=Q(type="debit")),
     )
@@ -728,6 +744,8 @@ def recurring_list_create(request, database_id):
     denied = require(request.fv_user, Action.MANAGE_FUNDS)
     if denied:
         return denied
+    if db.is_archived:
+        return json_error("This fund is archived", 400)
 
     body = parse_body(request)
     tx_type = str(body.get("type", "")).strip()
