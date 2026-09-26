@@ -856,8 +856,10 @@ export default function FundVaultApp() {
   const printLedger = () => {
     if (!currentDb) return;
     const txns = transactions.filter(txn => !txn.is_voided);
-    const totalCr = txns.filter(txn => txn.type === "credit").reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
-    const totalDr = txns.filter(txn => txn.type === "debit").reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+    // Totals must agree with the balance, which only counts approved rows; the
+    // table below still lists pending ones.
+    const totalCr = txns.filter(txn => txn.type === "credit" && txn.approved).reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+    const totalDr = txns.filter(txn => txn.type === "debit" && txn.approved).reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
     const printWindow = window.open("", "_blank");
     printWindow.document.write(`
       <style>

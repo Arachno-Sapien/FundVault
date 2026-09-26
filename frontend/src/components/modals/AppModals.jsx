@@ -209,8 +209,10 @@ export default function AppModals({
     if (from) filtered = filtered.filter(txn => new Date(txn.date) >= new Date(from));
     if (to) filtered = filtered.filter(txn => new Date(txn.date) <= new Date(`${to}T23:59:59`));
 
-    const totalCr = filtered.filter(txn => txn.type === "credit").reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
-    const totalDr = filtered.filter(txn => txn.type === "debit").reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+    // Totals must agree with the balance, which only counts approved rows; the
+    // PDF table below still lists pending ones.
+    const totalCr = filtered.filter(txn => txn.type === "credit" && txn.approved).reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+    const totalDr = filtered.filter(txn => txn.type === "debit" && txn.approved).reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
 
     // Loaded on first export: jsPDF is large and most sessions never use it.
     const [{ jsPDF }, { default: autoTable }] = await Promise.all([import("jspdf"), import("jspdf-autotable")]);

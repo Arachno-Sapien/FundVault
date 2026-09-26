@@ -93,8 +93,10 @@ export default function DatabaseView({
   };
 
   const activeTransactions = transactions.filter(txn => !txn.is_voided);
-  const totalCr = activeTransactions.filter(txn => txn.type === "credit").reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
-  const totalDr = activeTransactions.filter(txn => txn.type === "debit").reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+  // Totals must agree with the balance, which only counts approved rows; pending
+  // ones still show in the table above, just excluded here.
+  const totalCr = activeTransactions.filter(txn => txn.type === "credit" && txn.approved).reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+  const totalDr = activeTransactions.filter(txn => txn.type === "debit" && txn.approved).reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
   const lowBalance = Number(database.low_balance_threshold || 0) > 0 && Number(database.balance || 0) < Number(database.low_balance_threshold || 0);
 
   return (
