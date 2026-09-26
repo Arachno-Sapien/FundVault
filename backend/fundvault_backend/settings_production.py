@@ -71,6 +71,11 @@ DATABASES = {"default": _parse_database_url(_required("DATABASE_URL"))}
 FUNDVAULT_TENANT_HOST_ALLOWLIST = frozenset()
 
 SECURE_SSL_REDIRECT = True
+# Render's own health check is a plain HTTP probe against this exact path; a
+# 301 to https still counts as "healthy" to Render, so without this exemption
+# the SSL redirect answers the probe and the real health view never runs.
+# Matched against the path with no leading slash (see SecurityMiddleware).
+SECURE_REDIRECT_EXEMPT = [r"^api/health$"]
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_HSTS_SECONDS = 31536000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True

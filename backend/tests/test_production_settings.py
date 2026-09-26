@@ -125,3 +125,17 @@ class ProductionSettingsTests(SimpleTestCase):
         with mock.patch.dict(os.environ, REQUIRED, clear=True):
             settings = _load()
             self.assertIn("django.middleware.clickjacking.XFrameOptionsMiddleware", settings.MIDDLEWARE)
+
+    def test_health_check_path_is_exempt_from_the_ssl_redirect(self):
+        # Render's health check is a plain HTTP GET against this exact path.
+        # Without the exemption, SECURE_SSL_REDIRECT answers it with a 301
+        # (which Render's prober counts as healthy) and the real health view
+        # -- which actually checks the control plane -- never runs.
+        import re
+
+        with mock.patch.dict(os.environ, REQUIRED, clear=True):
+            settings = _load()
+        self.assertTrue(
+            any(re.search(pattern, "api/health") for pattern in settings.SECURE_REDIRECT_EXEMPT),
+            settings.SECURE_REDIRECT_EXEMPT,
+        )
