@@ -1,9 +1,7 @@
 import threading
-from datetime import timedelta
 
 from django.db import connections
 from django.test import Client, TransactionTestCase
-from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.orgs.context import org_context
