@@ -738,6 +738,14 @@ def _delete_trash_item_permanently(request, item):
             # is live again; just drop the stale trash row instead.
             fund = DatabaseFund.objects.select_for_update().filter(id=db_id, is_deleted=True).first()
             if fund:
+                # A merge chain (A+B -> M, then M+C -> M2) leaves A pointing
+                # at M. Purging M would otherwise let Django's SET_NULL clear
+                # A.merged_into, unblocking A's unarchive even though M2 still
+                # holds A's copied rows -- the double count the archive guard
+                # above exists to prevent. Re-point A at M's own target first,
+                # so it stays blocked (or is freed only when M was the chain's
+                # end, i.e. merged_into_id is already None).
+                DatabaseFund.objects.filter(merged_into_id=fund.id).update(merged_into_id=fund.merged_into_id)
                 txns = TransactionFund.objects.filter(database_id=db_id)
                 _delete_receipts_on_commit(request, txns.values_list("receipt_key", flat=True))
                 RecurringTransaction.objects.filter(database_id=db_id).delete()

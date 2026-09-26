@@ -866,8 +866,15 @@ Toggles the archived flag. Unarchiving is refused for a fund whose
 history but copies them into the merged fund too, so making a merge source
 live and writable again would double-count that money. A soft delete can be
 undone, so it isn't enough to lift the block — permanently delete the merged
-fund (empty it from trash) to undo the merge (that purge nulls `merged_into`
-via `ON DELETE SET NULL`, and unarchiving then goes through).
+fund (empty it from trash) to undo the merge (that purge clears `merged_into`).
+
+The block only lifts once no live or trashed fund anywhere in the chain still
+holds the merged money. A merge target is itself a live fund, so it can be
+merged again (M into M2); purging a fund that is itself a merge source
+re-points anything that was merged into it at its own target instead of
+clearing the link, so a source further back in the chain (A, merged into M,
+which was then merged into M2) stays blocked and pointing at M2 after M is
+purged, not silently freed.
 
 **Response (200):**
 
@@ -1399,6 +1406,11 @@ frontend fires this on every app load) never post the same due rule twice —
 the second caller locks after the first and sees its already-advanced
 `next_run`. A rule on an archived fund is skipped entirely — not advanced,
 not posted — so it runs normally as soon as the fund is unarchived.
+
+Advancing `next_run` clamps day-of-month like the monthly frequency does: a
+`yearly` rule due on Feb 29 advances to Feb 28 in a non-leap next year, and
+stays on the 28th in every following non-leap year rather than jumping back
+to the 29th when a leap year comes around.
 
 A created transaction is posted straight through only if the rule's creator
 is still an active Admin or Owner; otherwise it is gated exactly as if a

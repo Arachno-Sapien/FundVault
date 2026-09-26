@@ -480,6 +480,48 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
         with org_context(ORG_ALIAS):
             self.assertIsNone(DatabaseFund.objects.get(id="src").merged_into_id)
 
+    def test_purging_a_chained_merge_source_keeps_the_next_link_blocked(self):
+        # Merge A+B -> M, then M+C -> M2 (M is live after the first merge, so
+        # it can be merged again). Deleting and purging M must re-point A at
+        # M2 instead of nulling A.merged_into, or A could be unarchived while
+        # M2 still holds a copy of A's rows -- double-counting A's money.
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="a", name="A", created_by_id="u_owner")
+            DatabaseFund.objects.create(id="b", name="B", created_by_id="u_owner")
+            DatabaseFund.objects.create(id="c", name="C", created_by_id="u_owner")
+        merge1 = self.client.post(
+            "/api/databases/merge",
+            data=json.dumps({"sourceId": "a", "targetId": "b", "name": "M"}),
+            content_type="application/json", **self.owner_auth,
+        )
+        self.assertEqual(merge1.status_code, 200, merge1.content)
+        m_id = merge1.json()["id"]
+
+        merge2 = self.client.post(
+            "/api/databases/merge",
+            data=json.dumps({"sourceId": m_id, "targetId": "c", "name": "M2"}),
+            content_type="application/json", **self.owner_auth,
+        )
+        self.assertEqual(merge2.status_code, 200, merge2.content)
+        m2_id = merge2.json()["id"]
+
+        delete_response = self.client.delete(f"/api/databases/{m_id}", **self.owner_auth)
+        self.assertEqual(delete_response.status_code, 200, delete_response.content)
+        with org_context(ORG_ALIAS):
+            trash_item = TrashItem.objects.get(entity_type="database", entity_data__contains=m_id)
+        purge_response = self.client.delete(f"/api/trash/{trash_item.id}", **self.owner_auth)
+        self.assertEqual(purge_response.status_code, 200, purge_response.content)
+
+        response = self.client.post("/api/databases/a/archive", **self.owner_auth)
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(
+            response.json()["error"],
+            "This fund was merged into M2; permanently delete that fund (empty it from trash) to undo the merge",
+        )
+        with org_context(ORG_ALIAS):
+            self.assertEqual(DatabaseFund.objects.get(id="a").merged_into_id, m2_id)
+            self.assertTrue(DatabaseFund.objects.get(id="a").is_archived)
+
     def test_a_plain_archived_fund_still_unarchives_normally(self):
         # merged_into is null for an ordinary archive/unarchive -- the new
         # guard must not get in the way of that unrelated, existing flow.
