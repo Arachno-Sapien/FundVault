@@ -76,6 +76,42 @@ class OrgSettingsTests(OrgTestMixin, TestCase):
         self.assertEqual(database["database"], "fundvault_tenant_dev")
 
 
+class DeleteOrgTests(OrgTestMixin, TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.make_org()
+        self.owner = self.make_user("u_owner", "owner")
+        self.admin = self.make_user("u_admin", "admin")
+
+    def _delete(self, token, payload=None):
+        return self.client.delete(
+            "/api/orgs/settings",
+            data=json.dumps(payload or {}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+
+    def test_owner_can_delete_with_the_exact_name(self):
+        response = self._delete(self.owner, {"confirmName": "Acme"})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(Org.objects.filter(id=ORG_ID).exists())
+
+    def test_wrong_name_refuses_and_leaves_the_org(self):
+        response = self._delete(self.owner, {"confirmName": "not-acme"})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertTrue(Org.objects.filter(id=ORG_ID).exists())
+
+    def test_missing_name_refuses(self):
+        response = self._delete(self.owner)
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertTrue(Org.objects.filter(id=ORG_ID).exists())
+
+    def test_admin_cannot_delete(self):
+        response = self._delete(self.admin, {"confirmName": "Acme"})
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Org.objects.filter(id=ORG_ID).exists())
+
+
 class DatabaseSettingsTests(OrgTestMixin, TestCase):
     def setUp(self):
         self.client = Client()

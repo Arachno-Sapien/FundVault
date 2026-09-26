@@ -358,6 +358,19 @@ def org_settings(request):
             },
         })
 
+    if request.method == "DELETE":
+        # Only the control-plane row is removed (cascading to this org's join
+        # codes and email-index rows) -- the tenant database itself is never
+        # touched, since another org's db_connection may point at the same
+        # physical database (e.g. a duplicate created mid-migration).
+        body = parse_body(request)
+        confirm = str(body.get("confirmName", "")).strip()
+        if confirm != org.name:
+            return json_error("Type the organisation's exact name to confirm deletion", 400)
+        add_audit(request.fv_user.id, "delete", "org", org.id, f'Organisation "{org.name}" deleted')
+        org.delete()
+        return JsonResponse({"success": True})
+
     if request.method != "PUT":
         return json_error("Method not allowed", 405)
 
