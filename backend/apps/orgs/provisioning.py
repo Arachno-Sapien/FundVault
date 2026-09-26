@@ -256,3 +256,44 @@ def provision_org(name, url, owner_email):
         raise ProvisioningError(
             "An organisation with a similar name already exists — try a different name."
         )
+
+
+def migrate_org_database(org, url):
+    """Point an existing org at a different database. Raises ProvisioningError.
+
+    For an org migrating providers (e.g. Render Postgres -> Supabase/Neon/RDS):
+    the operator restores their own data into the new database beforehand
+    (this never copies data), and this just verifies the new target, makes
+    sure the schema exists there (a no-op migrate if they already restored
+    it), and repoints the org at it.
+    """
+    check = check_connection(url)
+    if not check.ok:
+        raise ProvisioningError(check.message)
+
+    alias = alias_for_org(org.id)
+    # Every authenticated request already holds a live connection for this
+    # alias (OrgContextMiddleware calls ensure_connection before the view
+    # runs) pointed at the *old* target. Django caches that connection
+    # wrapper once created, so merely overwriting connections.databases[alias]
+    # below would not stop `migrate` from reusing it -- close it first so the
+    # new config actually takes effect.
+    drop_connection(alias)
+    connections.databases[alias] = tenant_connections.build_config(url)
+    try:
+        call_command("migrate", database=alias, verbosity=0)
+    except Exception as exc:
+        drop_connection(alias)
+        raise ProvisioningError(f"Could not prepare that database: {_friendly(exc)}")
+
+    org.db_connection = url
+    org.save(update_fields=["db_connection"])
+    # Deliberately left registered (not dropped): the connection migrate just
+    # opened above already points at the URL just saved, and the rest of
+    # *this* request (e.g. org_settings' add_audit call right after this
+    # returns) still needs a live connection under this alias -- current_org_
+    # alias() was set by OrgContextMiddleware before the view ran and doesn't
+    # change mid-request, so dropping it here would make that write crash
+    # with ConnectionDoesNotExist. ensure_connection() picks it back up into
+    # the LRU on the next call, same as any alias registered outside it.
+    return org

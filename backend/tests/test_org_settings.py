@@ -1,10 +1,13 @@
 import json
 from unittest import mock
 
-from django.test import Client, TestCase
+from django.test import Client, TestCase, TransactionTestCase
 
+from apps.ledger.models import AuditLog
 from apps.orgs.models import Org
-from tests.support import OrgTestMixin, TENANT_URL
+from tests.support import ORG_ID, OrgTestMixin, TENANT_URL
+
+DEAD_URL = "postgres://fundvault:devpassword@127.0.0.1:9/nothing"
 
 
 class OrgSettingsTests(OrgTestMixin, TestCase):
@@ -63,6 +66,86 @@ class OrgSettingsTests(OrgTestMixin, TestCase):
         )
         self.assertNotIn("postgres://", response.content.decode("utf-8"))
         self.assertNotIn("devpassword", response.content.decode("utf-8"))
+
+    def test_get_exposes_host_but_not_credentials(self):
+        response = self.client.get(
+            "/api/orgs/settings", HTTP_AUTHORIZATION=f"Bearer {self.owner}"
+        )
+        database = response.json()["database"]
+        self.assertEqual(database["host"], "127.0.0.1")
+        self.assertEqual(database["database"], "fundvault_tenant_dev")
+
+
+class DatabaseSettingsTests(OrgTestMixin, TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.make_org()
+        self.owner = self.make_user("u_owner", "owner")
+
+    def _put(self, payload):
+        return self.client.put(
+            "/api/orgs/settings",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.owner}",
+        )
+
+    def test_missing_url_is_refused(self):
+        response = self._put({"database": {}})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(Org.objects.get(id=ORG_ID).db_connection, TENANT_URL)
+
+    def test_unreachable_database_is_refused_and_nothing_changes(self):
+        response = self._put({"database": {"databaseUrl": DEAD_URL}})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(Org.objects.get(id=ORG_ID).db_connection, TENANT_URL)
+
+    def test_internal_host_is_refused_and_says_nothing_useful(self):
+        response = self._put({"database": {"databaseUrl": "postgres://u:p@127.0.0.1:5555/db"}})
+        self.assertEqual(response.status_code, 400, response.content)
+        error = response.json()["error"].lower()
+        for leak in ("127.0.0.1", "5555", "refused", "timed out"):
+            self.assertNotIn(leak, error, error)
+        self.assertEqual(Org.objects.get(id=ORG_ID).db_connection, TENANT_URL)
+
+    @mock.patch("apps.orgs.provisioning.drop_connection")
+    def test_owner_can_repoint_the_database(self, _mock_drop):
+        # See MigrateOrgDatabaseTests.test_success_saves_the_new_connection_string
+        # for why TENANT_URL stands in as the "new" target and why
+        # drop_connection is mocked here: this org's alias is one Django's
+        # TestCase (via OrgTestMixin) wraps in its own atomic block.
+        response = self._put({"database": {"databaseUrl": TENANT_URL}})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIn("db_connection", response.json()["updated"])
+        self.assertEqual(Org.objects.get(id=ORG_ID).db_connection, TENANT_URL)
+
+
+class DatabaseSettingsUnmockedTests(OrgTestMixin, TransactionTestCase):
+    # TransactionTestCase, not TestCase, and drop_connection runs for real here
+    # (unlike DatabaseSettingsTests above): this is the regression test for a
+    # real bug migrate_org_database had -- it used to drop the tenant alias
+    # after saving, which is fine for *future* requests but broke the rest of
+    # *this* one: org_settings' add_audit call right after also writes through
+    # this same alias (AuditLog is a tenant-routed model), and it ran before
+    # ensure_connection ever got a chance to re-register the alias, crashing
+    # with ConnectionDoesNotExist. See MiddlewareTests in test_org_middleware.py
+    # for why this needs TransactionTestCase rather than TestCase.
+    def setUp(self):
+        self.client = Client()
+        self.make_org()
+        self.owner = self.make_user("u_owner", "owner")
+
+    def test_repointing_the_database_does_not_break_the_audit_write(self):
+        response = self.client.put(
+            "/api/orgs/settings",
+            data=json.dumps({"database": {"databaseUrl": TENANT_URL}}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.owner}",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(
+            AuditLog.objects.using("org_o1").filter(action="update", entity_type="org").exists()
+        )
 
 
 # Anyone can become an Owner for free -- POST /api/orgs/create is

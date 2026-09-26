@@ -10,6 +10,7 @@ exception text must never reach a JsonResponse. Log it for operators instead.
 
 import logging
 from datetime import timedelta
+from urllib.parse import urlparse
 
 import bcrypt
 from django.http import JsonResponse
@@ -26,7 +27,12 @@ from apps.common.utils import json_error, parse_body, uid
 from apps.orgs.connections import InvalidConnectionString, ensure_connection
 from apps.orgs.context import org_context
 from apps.orgs.models import EmailIndex, JoinCode, Org, new_join_code
-from apps.orgs.provisioning import ProvisioningError, check_connection, provision_org
+from apps.orgs.provisioning import (
+    ProvisioningError,
+    check_connection,
+    migrate_org_database,
+    provision_org,
+)
 from apps.orgs.serializers import serialize_org, serialize_org_summary
 
 logger = logging.getLogger(__name__)
@@ -322,8 +328,18 @@ def org_settings(request):
         except ValueError:
             storage = None
 
+        db = urlparse(org.db_connection) if org.db_connection else None
         return JsonResponse({
             "org": serialize_org(org),
+            # Host/port/database/username identify where the org's data
+            # lives without exposing the password, which urlparse never
+            # surfaces in these attributes.
+            "database": None if not db else {
+                "host": db.hostname or "",
+                "port": db.port or 5432,
+                "database": db.path.lstrip("/"),
+                "username": db.username or "",
+            },
             "storage": None if not storage else {
                 "endpoint_url": storage.get("endpoint_url", ""),
                 "bucket": storage.get("bucket", ""),
@@ -381,6 +397,26 @@ def org_settings(request):
             return json_error(f"AI provider check failed: {message}", 400)
         org.ai_config = raw
         updates.append("ai_config")
+
+    if "database" in body:
+        # Checked last: unlike storage/ai above, this has an external side
+        # effect the moment it runs (migrate_org_database probes and migrates
+        # the new database, then saves db_connection immediately, ahead of
+        # the org.save() below) — so any other section in this same request
+        # gets to fail first, before the org's live database is switched.
+        raw = body["database"]
+        if not isinstance(raw, dict):
+            return json_error("database must be an object", 400)
+        url = str(raw.get("databaseUrl", "")).strip()
+        if not url:
+            return json_error("Database URL required", 400)
+        try:
+            migrate_org_database(org, url)
+        except ProvisioningError as exc:
+            # migrate_org_database's messages are already scrubbed (see
+            # provisioning._friendly / check_connection) — safe verbatim.
+            return json_error(str(exc), 400)
+        updates.append("db_connection")
 
     if not updates:
         return json_error("Nothing to update", 400)

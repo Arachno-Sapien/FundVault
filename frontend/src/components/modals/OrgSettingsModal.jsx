@@ -6,11 +6,13 @@ import Modal from "components/modals/Modal";
 
 const BLANK_STORAGE = { endpoint_url: "", bucket: "", region: "auto", access_key: "", secret_key: "" };
 const BLANK_AI = { provider: "openai_compatible", base_url: "", model: "", api_key: "" };
+const SECTION_LABEL = { ai: "AI provider", database: "Database connection" };
 
 export default function OrgSettingsModal({ open, onClose, request, toast }) {
   const [current, setCurrent] = useState(null);
   const [storage, setStorage] = useState(BLANK_STORAGE);
   const [ai, setAi] = useState(BLANK_AI);
+  const [databaseUrl, setDatabaseUrl] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -26,8 +28,9 @@ export default function OrgSettingsModal({ open, onClose, request, toast }) {
     setBusy(true);
     try {
       await request("/orgs/settings", { method: "PUT", body: JSON.stringify({ [section]: payload }) });
-      toast(`${section === "ai" ? "AI provider" : "Storage"} saved and verified`, "success");
+      toast(`${SECTION_LABEL[section] || "Storage"} saved and verified`, "success");
       setCurrent(await request("/orgs/settings"));
+      if (section === "database") setDatabaseUrl("");
     } catch (err) {
       toast(err.message, "error");
     } finally {
@@ -37,6 +40,42 @@ export default function OrgSettingsModal({ open, onClose, request, toast }) {
 
   return (
     <Modal open={open} id="orgSettingsModal" title="Organisation settings" onClose={onClose} large>
+      <div className="section-label" style={{ marginBottom: 8 }}>
+        Database connection
+      </div>
+      {current?.database ? (
+        <p className="hint">
+          Connected: {current.database.database} on {current.database.host}:{current.database.port} (user{" "}
+          {current.database.username})
+        </p>
+      ) : (
+        <p className="hint">Not configured.</p>
+      )}
+      <p className="hint" style={{ marginBottom: 8 }}>
+        To migrate to another provider (e.g. moving off Render Postgres to Supabase, Neon, or your own
+        server): restore your data into the new database yourself first, then paste its connection string
+        below. This only repoints the app — it never copies data for you.
+      </p>
+      <div className="form-group" style={{ marginBottom: 20 }}>
+        <label>Database URL</label>
+        <input
+          type="password"
+          placeholder="postgres://user:password@host:5432/dbname"
+          value={databaseUrl}
+          autoComplete="off"
+          onChange={e => setDatabaseUrl(e.target.value)}
+        />
+        <div className="form-actions" style={{ marginTop: 10 }}>
+          <button
+            className="btn btn-primary"
+            disabled={busy || !databaseUrl.trim()}
+            onClick={() => save("database", { databaseUrl: databaseUrl.trim() })}
+          >
+            {busy ? "Verifying…" : "Save and verify database"}
+          </button>
+        </div>
+      </div>
+
       <div className="section-label" style={{ marginBottom: 8 }}>
         Receipt storage
       </div>

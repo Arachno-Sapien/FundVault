@@ -11,6 +11,7 @@ from apps.orgs.provisioning import (
     ProvisioningError,
     _friendly,
     check_connection,
+    migrate_org_database,
     provision_org,
     resolve_target,
 )
@@ -420,3 +421,47 @@ class IPv6OnlyHostTests(TestCase):
     def test_network_unreachable_is_explained(self):
         message = _friendly(Exception('connection to server at "x" failed: Network is unreachable'))
         self.assertIn("IPv4 connection pooler", message)
+
+
+class MigrateOrgDatabaseTests(TestCase):
+    """apps.orgs.provisioning.migrate_org_database — repointing an existing
+    org at a different database (e.g. an operator migrating providers)."""
+
+    databases = {"default", "tenant_dev"} | PROVISION_ALIASES
+
+    @classmethod
+    def setUpClass(cls):
+        _register_provision_aliases()
+        super().setUpClass()
+
+    def setUp(self):
+        self.org = Org.objects.create(
+            id="provtest1", name="Acme", slug="acme",
+            owner_email="o@example.com", db_connection=TENANT_URL,
+        )
+
+    def test_rejects_a_private_host_before_touching_anything(self):
+        with self.assertRaises(ProvisioningError):
+            migrate_org_database(self.org, "postgres://u:p@10.0.0.1:5432/db")
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.db_connection, TENANT_URL)
+
+    def test_rejects_an_unreachable_host(self):
+        with self.assertRaises(ProvisioningError):
+            migrate_org_database(self.org, DEAD_URL)
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.db_connection, TENANT_URL)
+
+    @mock.patch("apps.orgs.provisioning.drop_connection")
+    def test_success_saves_the_new_connection_string(self, _mock_drop):
+        # Reuses TENANT_URL as the "new" target -- same stand-in the rest of
+        # this file uses for "some Postgres the caller supplied"; the point
+        # here is the migrate/save mechanics, not that the string differs
+        # byte-for-byte. drop_connection is mocked for the same reason as
+        # test_slug_collision_race_is_a_clean_provisioning_error above: this
+        # org's alias is one Django's TestCase wraps in its own atomic block,
+        # and actually closing it mid-test fights that teardown.
+        result = migrate_org_database(self.org, TENANT_URL)
+        self.assertEqual(result.db_connection, TENANT_URL)
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.db_connection, TENANT_URL)
