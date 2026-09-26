@@ -119,7 +119,7 @@ export default function DatabaseView({
                 📁 {database.is_archived ? "Unarchive" : "Archive"}
               </button>
             )}
-            {permissions.manageFunds && (
+            {!database.is_archived && permissions.manageFunds && (
               <button className="btn btn-outline btn-sm" onClick={onOpenRecurring}>
                 🔄 Recurring
               </button>

@@ -327,6 +327,44 @@ class LedgerMoneyTests(OrgTestMixin, TestCase):
         self.assertEqual(txn.running_balance, 60.0)
         self.assertEqual(self._fund().balance, 60.0)
 
+    def test_update_allowed_when_a_void_already_left_the_fund_negative(self):
+        # transaction_void has no balance check, so voiding a credit that was
+        # already spent can leave the fund negative on its own. The item-2
+        # guard must not then refuse every later edit in that fund -- only
+        # ones that make the balance worse than it already is.
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t0", database_id="f1", type="credit", amount=100.0,
+                date=timezone.now() - timedelta(days=1), mode="cash", running_balance=100.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="debit", amount=80.0,
+                date=timezone.now(), mode="cash", running_balance=20.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=20.0)
+        void_response = self._send("post", "/api/transactions/t0/void", {"reason": "duplicate"})
+        self.assertEqual(void_response.status_code, 200, void_response.content)
+        self.assertEqual(self._fund().balance, -80.0)
+
+        # A notes-only edit doesn't touch money at all.
+        notes_response = self._send("put", "/api/transactions/t1", {"notes": "reviewed"})
+        self.assertEqual(notes_response.status_code, 200, notes_response.content)
+        self.assertEqual(self._fund().balance, -80.0)
+
+        # Lowering the debit's amount raises the balance from -80 to -10: an
+        # improvement, even though it's still negative.
+        improve_response = self._send("put", "/api/transactions/t1", {"amount": 10.0})
+        self.assertEqual(improve_response.status_code, 200, improve_response.content)
+        self.assertEqual(self._fund().balance, -10.0)
+
+        # Raising it back up would make the balance worse again.
+        worse_response = self._send("put", "/api/transactions/t1", {"amount": 90.0})
+        self.assertEqual(worse_response.status_code, 400, worse_response.content)
+        self.assertEqual(worse_response.json()["error"], "Insufficient balance for this change")
+        self.assertEqual(self._fund().balance, -10.0)
+
     def test_recurring_create_refuses_an_archived_fund(self):
         with org_context(ORG_ALIAS):
             DatabaseFund.objects.filter(id="f1").update(is_archived=True)

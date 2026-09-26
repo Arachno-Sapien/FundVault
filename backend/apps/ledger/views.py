@@ -605,8 +605,13 @@ def transaction_update(request, transaction_id):
             # Raising an approved debit's amount (or lowering an approved
             # credit's) can drive the fund negative with no other check --
             # raise inside the atomic block so the save above and the
-            # recalculation both roll back together.
-            if recalculate_running_balances(txn.database_id) < 0:
+            # recalculation both roll back together. Only refuse when the
+            # edit makes the balance *worse*: transaction_void has no balance
+            # check, so a fund can already be negative before this edit (e.g.
+            # a spent credit gets voided) -- in that case a notes-only edit or
+            # one that raises the balance must still go through.
+            new_balance = recalculate_running_balances(txn.database_id)
+            if new_balance < 0 and new_balance < fund.balance:
                 raise InsufficientBalance()
     except InsufficientBalance:
         return json_error("Insufficient balance for this change", 400)

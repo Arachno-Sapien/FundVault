@@ -241,9 +241,9 @@ does not see Owner-minted Admin codes, even though they exist in the org.
 **POST Response (200):** same shape as one item of the GET array above
 (`uses` starts at `0`, `revoked` at `false`).
 
-A `maxUses`/`expiresInDays` that isn't an integer, including a JSON number
-too large to fit a float (which parses to `Infinity` and can't convert to
-an integer), is rejected with `400`, never a `500`.
+A `maxUses`/`expiresInDays` that can't be converted to a number, including a
+JSON number too large for a float (it parses to `Infinity`), is rejected with
+`400`, never a `500`. Fractional values are truncated.
 
 **Error Responses:**
 
