@@ -41,6 +41,11 @@ backend/.env
 # Local Claude Code launch configs and worktrees
 .claude/
 
+# Impeccable design-skill artifacts
+.impeccable/
+/PRODUCT.md
+/DESIGN.md
+
 # Logs
 *.log
 coverage/
