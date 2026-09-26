@@ -91,6 +91,8 @@ a join code — that endpoint doesn't exist.
 ## Run it yourself
 
 Prerequisites: Python 3.11+, Node.js 20.9+, Docker (for local Postgres), Git.
+`python` must resolve to 3.11+ — activate a virtualenv first if your system
+Python is older or missing.
 
 1. **Start local Postgres** — one database for the control plane, one for a
    development tenant:
@@ -99,7 +101,13 @@ Prerequisites: Python 3.11+, Node.js 20.9+, Docker (for local Postgres), Git.
    docker compose up -d
    ```
 
-2. **Configure the backend** — copy the example env file and fill it in:
+2. **Install dependencies:**
+
+   ```bash
+   npm run install:all
+   ```
+
+3. **Configure the backend** — copy the example env file and fill it in:
 
    ```bash
    cp backend/.env.example backend/.env
@@ -116,12 +124,6 @@ Prerequisites: Python 3.11+, Node.js 20.9+, Docker (for local Postgres), Git.
    Paste the result into `backend/.env` as `FUNDVAULT_SECRET_KEY`. The other
    defaults in `.env.example` (`DATABASE_URL`, `DEV_TENANT_DATABASE_URL`)
    already match the `docker-compose.yml` ports.
-
-3. **Install dependencies:**
-
-   ```bash
-   npm run install:all
-   ```
 
 4. **Migrate the control plane:**
 
@@ -140,6 +142,16 @@ Prerequisites: Python 3.11+, Node.js 20.9+, Docker (for local Postgres), Git.
 
 Or, on Windows, run `install.bat` once and `run.bat` every time after —
 `run.bat` also brings up the two Docker databases automatically.
+
+6. **Create your first organisation** — open `http://localhost:3001`, choose
+   **Create organisation**, and paste the dev tenant's connection string:
+
+   ```text
+   postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev
+   ```
+
+   Use `127.0.0.1`, not `localhost` — the dev SSRF allowlist only permits the
+   exact `127.0.0.1:5434` pair.
 
 AI keys and receipt storage credentials are **not** environment variables —
 each organisation configures its own from its org settings page after
@@ -237,7 +249,9 @@ New → Blueprint → pick this repository (branch `main`). Render asks for:
 - `DATABASE_URL` — the connection string from step 1
 - `FUNDVAULT_SECRET_KEY` — the key from step 2
 - `CORS_ALLOWED_ORIGINS` — your Vercel URL, e.g. `https://fundvault.vercel.app`
-  (a placeholder is fine now; fix it after step 4)
+  (it must be a full URL with a scheme — corsheaders' system check fails the
+  build otherwise; a placeholder like `https://example.com` is fine now, fix
+  it to the real URL after step 4)
 
 `DJANGO_SECRET_KEY` and `JWT_SECRET` are generated for you. The service's own
 `*.onrender.com` hostname is allowed automatically; set `DJANGO_ALLOWED_HOSTS`
@@ -276,6 +290,8 @@ OpenAI-compatible provider) are optional; the Owner sets them up under
   proxy that may be the proxy's address, so limits could be shared between users;
   check one request's `X-Forwarded-For` after deploying before relying on them.
 - Rate-limit counters live in each worker's memory and reset when it restarts.
+  `render.yaml` restarts each gunicorn worker every ~500 requests
+  (`--max-requests`), which also resets its rate-limit counters.
 
 ## Troubleshooting
 
