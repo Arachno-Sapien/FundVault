@@ -304,37 +304,41 @@ def database_archive(request, database_id):
     denied = require(request.fv_user, Action.MANAGE_FUNDS)
     if denied:
         return denied
-    db = _get_fund(database_id)
-    if not db:
-        return json_error("Database not found", 404)
-    if db.is_archived and db.merged_into_id:
-        # A merge archives its source and target and copies their rows into
-        # the merged fund. Unarchiving a merge source here would make it a
-        # live, writable fund again while its money still lives in the
-        # merged fund too -- refuse as long as that merged fund's row still
-        # exists at all, soft-deleted (in trash) or not. A soft-delete can be
-        # undone (trash_restore), so checking is_deleted=False here would let
-        # "delete the merged fund, unarchive the source, restore the merged
-        # fund from trash" put both funds live with the same money. Only a
-        # permanent purge (emptying it from trash) actually removes the row
-        # and nulls merged_into via on_delete=SET_NULL.
-        merged_fund = DatabaseFund.objects.filter(id=db.merged_into_id).first()
-        if merged_fund:
-            return json_error(
-                f"This fund was merged into {merged_fund.name}; "
-                "permanently delete that fund (empty it from trash) to undo the merge",
-                400,
-            )
-    db.is_archived = not db.is_archived
-    db.save(update_fields=["is_archived"])
-    add_audit(
-        request.fv_user.id,
-        "update",
-        "database",
-        db.id,
-        f'Database "{db.name}" {"archived" if db.is_archived else "unarchived"}',
-    )
-    return JsonResponse({"success": True, "is_archived": db.is_archived})
+    with transaction.atomic(using=current_org_alias()):
+        # Locked so a concurrent purge that re-points merged_into along a
+        # merge chain has committed before the guard below reads it.
+        db = lock_fund(database_id)
+        if not db or db.is_deleted:
+            return json_error("Database not found", 404)
+        if db.is_archived and db.merged_into_id:
+            # A merge archives its source and target and copies their rows into
+            # the merged fund. Unarchiving a merge source here would make it a
+            # live, writable fund again while its money still lives in the
+            # merged fund too -- refuse as long as that merged fund's row still
+            # exists at all, soft-deleted (in trash) or not. A soft-delete can be
+            # undone (trash_restore), so checking is_deleted=False here would let
+            # "delete the merged fund, unarchive the source, restore the merged
+            # fund from trash" put both funds live with the same money. Only a
+            # permanent purge (emptying it from trash) actually removes the row;
+            # it re-points merged_into to the purged fund's own target, clearing
+            # it only at the end of the chain.
+            merged_fund = DatabaseFund.objects.filter(id=db.merged_into_id).first()
+            if merged_fund:
+                return json_error(
+                    f"This fund was merged into {merged_fund.name}; "
+                    "permanently delete that fund (empty it from trash) to undo the merge",
+                    400,
+                )
+        db.is_archived = not db.is_archived
+        db.save(update_fields=["is_archived"])
+        add_audit(
+            request.fv_user.id,
+            "update",
+            "database",
+            db.id,
+            f'Database "{db.name}" {"archived" if db.is_archived else "unarchived"}',
+        )
+        return JsonResponse({"success": True, "is_archived": db.is_archived})
 
 
 @csrf_exempt
@@ -771,7 +775,11 @@ def trash_restore(request, item_id):
 
     if item.entity_type == "database":
         data = json.loads(item.entity_data)
-        DatabaseFund.objects.filter(id=data.get("id")).update(is_deleted=False)
+        restored = DatabaseFund.objects.filter(id=data.get("id")).update(is_deleted=False)
+        if not restored:
+            # A concurrent purge already hard-deleted the fund.
+            item.delete()
+            return json_error("Item not found", 404)
 
     item.delete()
     add_audit(request.fv_user.id, "update", item.entity_type, item.id, "Item restored from trash")

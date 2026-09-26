@@ -866,7 +866,8 @@ Toggles the archived flag. Unarchiving is refused for a fund whose
 history but copies them into the merged fund too, so making a merge source
 live and writable again would double-count that money. A soft delete can be
 undone, so it isn't enough to lift the block — permanently delete the merged
-fund (empty it from trash) to undo the merge (that purge clears `merged_into`).
+fund (empty it from trash) to undo the merge (that purge re-points
+`merged_into` to the purged fund's own target, clearing it at the end of the chain).
 
 The block only lifts once no live or trashed fund anywhere in the chain still
 holds the merged money. A merge target is itself a live fund, so it can be
@@ -1091,7 +1092,8 @@ balance — not merely negative on its own. A fund can already be negative
 (voiding a spent credit has no balance check), and in that case a
 notes-only edit, or an amount edit that raises the balance while leaving it
 negative, still goes through; only an edit that lowers it further is
-rejected.
+rejected. Fields left out of the body keep the values from the row as
+re-read under the fund lock, so a concurrent edit is not overwritten.
 
 **Request Body:**
 
@@ -1117,7 +1119,7 @@ endpoint above).
   Insufficient balance for this change
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
-- `404`: Transaction not found
+- `404`: Transaction not found / Database not found
 - `405`: Method not allowed
 
 ---

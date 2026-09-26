@@ -561,6 +561,26 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
             self.assertTrue(TransactionFund.objects.filter(id="t1").exists())
             self.assertFalse(TrashItem.objects.filter(id="tr1").exists())
 
+    def test_restoring_a_trash_item_whose_fund_was_purged_is_404(self):
+        # A restore that loses the race to a purge finds no fund row to
+        # un-delete; it must say so rather than report success.
+        with org_context(ORG_ALIAS):
+            TrashItem.objects.create(
+                id="tr1", entity_type="database",
+                entity_data=json.dumps({"id": "gone"}), deleted_by_id="u_owner",
+            )
+
+        response = self.client.post("/api/trash/tr1/restore", **self.owner_auth)
+        self.assertEqual(response.status_code, 404, response.content)
+        with org_context(ORG_ALIAS):
+            self.assertFalse(TrashItem.objects.filter(id="tr1").exists())
+
+    def test_non_utf8_body_is_400_not_500(self):
+        response = self.client.post(
+            "/api/databases", data=bytes([0xFF, 0xFE, 0x7B]), content_type="application/json", **self.owner_auth
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+
     def test_yearly_recurrence_from_feb_29_clamps_to_feb_28(self):
         self.assertEqual(next_recurring_date(date(2024, 2, 29), "yearly"), date(2025, 2, 28))
         self.assertEqual(next_recurring_date(date(2020, 2, 29), "yearly"), date(2021, 2, 28))

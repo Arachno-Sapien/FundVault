@@ -151,7 +151,7 @@ Or, on Windows, run `install.bat` once and `run.bat` every time after —
    ```
 
    Use `127.0.0.1`, not `localhost` — the dev SSRF allowlist (active only with
-   `DEBUG=True`) matches exact `127.0.0.1` host:port pairs, not hostnames.
+   `DJANGO_DEBUG=true`, the dev default) matches exact `127.0.0.1` host:port pairs, not hostnames.
 
 AI keys and receipt storage credentials are **not** environment variables —
 each organisation configures its own from its org settings page after

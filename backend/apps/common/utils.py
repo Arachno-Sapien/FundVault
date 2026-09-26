@@ -48,7 +48,7 @@ def parse_body(request):
         return {}
     try:
         data = json.loads(request.body.decode("utf-8"))
-    except json.JSONDecodeError:
+    except ValueError:  # JSONDecodeError, or UnicodeDecodeError for non-UTF-8 bytes
         return {}
     # Views call .get() on the result, so a JSON array or scalar body is
     # treated as empty and fails their own "required" checks with a 400.

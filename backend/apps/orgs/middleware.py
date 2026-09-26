@@ -111,19 +111,10 @@ class OrgContextMiddleware:
         """Login carries orgId in the body — there is no token yet."""
         if request.path != "/api/auth/login":
             return None
-        # parse_body already guards against a non-dict body (a JSON array,
-        # string, number, or null), so a malformed POST /api/auth/login gets
-        # the same "Choose an organisation first" 400 as one with no orgId,
-        # never a 500 from .get() on a list here. It only catches
-        # json.JSONDecodeError though, not a body that isn't valid UTF-8 at
-        # all -- request.body.decode("utf-8") then raises UnicodeDecodeError
-        # (a ValueError subclass) straight through parse_body. Catch it here
-        # and fall through to None, same as the old "except ValueError"
-        # behaviour, so the login view's own 400 answers instead of a 500.
-        try:
-            payload = parse_body(request)
-        except ValueError:
-            return None
+        # parse_body turns a malformed body (bad JSON, non-UTF-8 bytes, or a
+        # JSON array/scalar) into {}, so it gets the same "Choose an
+        # organisation first" 400 as one with no orgId, never a 500.
+        payload = parse_body(request)
         org_id = str(payload.get("orgId", "")).strip()
         if not org_id:
             return JsonResponse({"error": "Choose an organisation first"}, status=400)
