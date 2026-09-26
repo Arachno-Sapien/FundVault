@@ -241,6 +241,10 @@ does not see Owner-minted Admin codes, even though they exist in the org.
 **POST Response (200):** same shape as one item of the GET array above
 (`uses` starts at `0`, `revoked` at `false`).
 
+A `maxUses`/`expiresInDays` that isn't an integer, including a JSON number
+too large to fit a float (which parses to `Infinity` and can't convert to
+an integer), is rejected with `400`, never a `500`.
+
 **Error Responses:**
 
 - `400`: You cannot create a join code granting `<role>` / maxUses and
@@ -1043,7 +1047,9 @@ receipt, then a receipt is attached separately with
 **PUT** `/transactions/<transaction_id>`
 
 Cannot edit a voided transaction. Editing the amount or date recalculates
-running balances for the whole fund.
+running balances for the whole fund. If the edit (e.g. raising an approved
+debit's amount, or lowering an approved credit's) would drive the fund's
+balance below 0, the whole edit is rejected and nothing changes.
 
 **Request Body:**
 
@@ -1065,7 +1071,8 @@ endpoint above).
 
 - `400`: Amount must be greater than 0 / Amount must be at most
   ₹1,000,000,000,000 / Cannot edit a voided transaction /
-  Transaction date is required / This fund is archived
+  Transaction date is required / This fund is archived /
+  Insufficient balance for this change
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Transaction not found
@@ -1309,13 +1316,16 @@ transactions).
 }
 ```
 
+Refused on an archived fund, same as the other write paths -- a rule created
+there would never fire (recurring processing skips archived funds).
+
 **Response (200):** the created recurring transaction (same shape as above).
 
 **Error Responses:**
 
 - `400`: Invalid transaction type / Amount must be greater than 0 / Amount
   must be at most ₹1,000,000,000,000 / Invalid frequency / Description
-  required / Invalid next run date
+  required / Invalid next run date / This fund is archived
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Database not found
@@ -1518,16 +1528,20 @@ same per-item receipt cleanup as above.
 
 **GET** `/analytics/overview`
 
-Totals across every non-deleted fund in the organisation.
+Totals across every non-deleted, non-archived fund in the organisation. A
+merged fund's source and target are archived (see `POST /databases/merge`)
+but keep their balances and rows for history, so archived funds and their
+transactions are excluded here -- otherwise that money would be counted
+twice, once on the archived originals and once on the merged fund.
 
 **Response (200):**
 
 ```json
 {
   "totalDatabases": "integer",
-  "totalBalance": "float, rounded to 2dp (sum of all non-deleted funds' balances)",
-  "totalCredits": "float, rounded to 2dp (sum of all non-voided credit transactions)",
-  "totalDebits": "float, rounded to 2dp (sum of all non-voided debit transactions)"
+  "totalBalance": "float, rounded to 2dp (sum of all non-deleted, non-archived funds' balances)",
+  "totalCredits": "float, rounded to 2dp (sum of all non-voided credit transactions in non-archived funds)",
+  "totalDebits": "float, rounded to 2dp (sum of all non-voided debit transactions in non-archived funds)"
 }
 ```
 
@@ -1717,7 +1731,7 @@ can't be reached is reported and skipped rather than failing the whole run.
 - A JSON request body that isn't an object (an array, a bare number/string,
   or invalid JSON) is treated as an empty object, so endpoints with
   required fields answer `400`; an endpoint with no required fields (e.g.
-  `PUT /transactions/<id>/edit`) simply treats it as a no-op edit and
+  `PUT /transactions/<transaction_id>`) simply treats it as a no-op edit and
   returns `200`.
 - Receipts are never stored inline as base64 — only an object key
   (`receipt_key`) plus a signed URL minted at read time (`receipt_url`,
