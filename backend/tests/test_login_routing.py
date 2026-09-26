@@ -136,6 +136,20 @@ class LoginTests(OrgTestMixin, TestCase):
                     json.loads(response.content)["error"], "Choose an organisation first"
                 )
 
+    def test_non_utf8_login_body_is_a_normal_400_not_a_500(self):
+        # A body that isn't valid UTF-8 at all makes request.body.decode
+        # raise UnicodeDecodeError straight out of parse_body, inside the
+        # middleware's own org lookup -- before the dict-guard in the test
+        # above ever runs. It must land on the same 400 as a missing orgId,
+        # not a 500.
+        response = self.client.post(
+            "/api/auth/login", data=b"\xff\xfe{", content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(
+            json.loads(response.content)["error"], "Choose an organisation first"
+        )
+
     def test_login_refreshes_the_email_index(self):
         before = EmailIndex.objects.get(email="alice@example.com").last_seen_at
         self._login()

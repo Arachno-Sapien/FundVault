@@ -107,3 +107,63 @@ class BalanceConcurrencyTests(OrgTestMixin, TransactionTestCase):
         with org_context(ORG_ALIAS):
             credit_row = TransactionFund.objects.get(database_id="f1", amount=5.0)
         self.assertEqual(credit_row.running_balance, 5.0)
+
+    def test_notes_only_edit_racing_an_amount_edit_does_not_lose_it(self):
+        # transaction_update reads the row once, unlocked, before it takes
+        # the fund lock. Hold a notes-only PUT right after that unlocked
+        # read -- before it re-reads the row under the lock -- and let a
+        # second PUT change the amount and commit in that window. Any field
+        # the notes-only PUT doesn't mention (amount here) must come from
+        # the fresh, locked re-read, not from the stale copy it saw before
+        # the other edit landed, or that edit is silently undone.
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="debit", amount=30.0,
+                date=timezone.now(), mode="cash", running_balance=70.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=70.0)
+
+        unlocked_read_done = threading.Event()
+        amount_edit_done = threading.Event()
+        delayed = []
+
+        def delay_after_unlocked_read(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if not delayed and sql.startswith("SELECT") and '"transactions"' in sql and "FOR UPDATE" not in sql:
+                delayed.append(True)
+                unlocked_read_done.set()
+                amount_edit_done.wait(timeout=5)
+            return result
+
+        notes_results, notes_errors = [], []
+        amount_results, amount_errors = [], []
+
+        def notes_edit():
+            with connections[ORG_ALIAS].execute_wrapper(delay_after_unlocked_read):
+                _request("put", "/api/transactions/t1", {"notes": "reviewed"},
+                         self.token, notes_results, notes_errors)
+
+        def amount_edit():
+            unlocked_read_done.wait(timeout=5)
+            _request("put", "/api/transactions/t1", {"amount": 50.0},
+                     self.token, amount_results, amount_errors)
+            amount_edit_done.set()
+
+        threads = [threading.Thread(target=notes_edit), threading.Thread(target=amount_edit)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+
+        self.assertTrue(delayed, "the notes-only PUT never reached its unlocked read")
+        self.assertEqual(notes_errors, [], f"threads raised: {notes_errors}")
+        self.assertEqual(amount_errors, [], f"threads raised: {amount_errors}")
+        self.assertEqual(notes_results[0].status_code, 200, notes_results[0].content)
+        self.assertEqual(amount_results[0].status_code, 200, amount_results[0].content)
+
+        with org_context(ORG_ALIAS):
+            txn = TransactionFund.objects.get(id="t1")
+        self.assertEqual(txn.amount, 50.0, "the notes-only edit clobbered the concurrent amount edit")
+        self.assertEqual(txn.notes, "reviewed")
+        self.assertEqual(self._fund_balance(), 50.0)

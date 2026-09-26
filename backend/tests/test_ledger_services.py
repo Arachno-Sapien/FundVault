@@ -411,12 +411,17 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
         self.assertEqual(response.status_code, 400, response.content)
         self.assertEqual(
             response.json()["error"],
-            "This fund was merged into Merged Fund; delete that fund to undo the merge",
+            "This fund was merged into Merged Fund; "
+            "permanently delete that fund (empty it from trash) to undo the merge",
         )
         with org_context(ORG_ALIAS):
             self.assertTrue(DatabaseFund.objects.get(id="src").is_archived)
 
-    def test_unarchiving_a_merge_source_is_allowed_once_the_merged_fund_is_deleted(self):
+    def test_unarchiving_a_merge_source_stays_refused_while_the_merged_fund_is_only_soft_deleted(self):
+        # A soft delete can be undone (trash_restore), so merely being in
+        # trash must not be enough to lift the unarchive guard: otherwise
+        # "delete the merged fund, unarchive the source, restore the merged
+        # fund" would leave both funds live and holding the same money.
         with org_context(ORG_ALIAS):
             DatabaseFund.objects.create(id="src", name="Source", created_by_id="u_owner")
             DatabaseFund.objects.create(id="tgt", name="Target", created_by_id="u_owner")
@@ -426,12 +431,54 @@ class LedgerServicesTests(OrgTestMixin, TestCase):
             content_type="application/json", **self.owner_auth,
         )
         merged_id = merge_response.json()["id"]
+
+        delete_response = self.client.delete(f"/api/databases/{merged_id}", **self.owner_auth)
+        self.assertEqual(delete_response.status_code, 200, delete_response.content)
+
+        response = self.client.post("/api/databases/src/archive", **self.owner_auth)
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(
+            response.json()["error"],
+            "This fund was merged into Merged Fund; "
+            "permanently delete that fund (empty it from trash) to undo the merge",
+        )
+
+        # Restoring the merged fund from trash must not change that: src is
+        # still refused, and both funds are live with their own money intact.
         with org_context(ORG_ALIAS):
-            DatabaseFund.objects.filter(id=merged_id).update(is_deleted=True)
+            trash_item = TrashItem.objects.get(entity_type="database")
+        restore_response = self.client.post(f"/api/trash/{trash_item.id}/restore", **self.owner_auth)
+        self.assertEqual(restore_response.status_code, 200, restore_response.content)
+
+        response = self.client.post("/api/databases/src/archive", **self.owner_auth)
+        self.assertEqual(response.status_code, 400, response.content)
+        with org_context(ORG_ALIAS):
+            self.assertTrue(DatabaseFund.objects.get(id="src").is_archived)
+            self.assertFalse(DatabaseFund.objects.get(id=merged_id).is_deleted)
+
+    def test_unarchiving_a_merge_source_is_allowed_once_the_merged_fund_is_purged(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.create(id="src", name="Source", created_by_id="u_owner")
+            DatabaseFund.objects.create(id="tgt", name="Target", created_by_id="u_owner")
+        merge_response = self.client.post(
+            "/api/databases/merge",
+            data=json.dumps({"sourceId": "src", "targetId": "tgt", "name": "Merged Fund"}),
+            content_type="application/json", **self.owner_auth,
+        )
+        merged_id = merge_response.json()["id"]
+
+        delete_response = self.client.delete(f"/api/databases/{merged_id}", **self.owner_auth)
+        self.assertEqual(delete_response.status_code, 200, delete_response.content)
+        with org_context(ORG_ALIAS):
+            trash_item = TrashItem.objects.get(entity_type="database")
+        purge_response = self.client.delete(f"/api/trash/{trash_item.id}", **self.owner_auth)
+        self.assertEqual(purge_response.status_code, 200, purge_response.content)
 
         response = self.client.post("/api/databases/src/archive", **self.owner_auth)
         self.assertEqual(response.status_code, 200, response.content)
         self.assertFalse(response.json()["is_archived"])
+        with org_context(ORG_ALIAS):
+            self.assertIsNone(DatabaseFund.objects.get(id="src").merged_into_id)
 
     def test_a_plain_archived_fund_still_unarchives_normally(self):
         # merged_into is null for an ordinary archive/unarchive -- the new

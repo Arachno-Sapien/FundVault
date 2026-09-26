@@ -311,12 +311,18 @@ def database_archive(request, database_id):
         # A merge archives its source and target and copies their rows into
         # the merged fund. Unarchiving a merge source here would make it a
         # live, writable fund again while its money still lives in the
-        # merged fund too -- refuse, unless that merged fund was itself
-        # deleted (then there is nothing left to double-count against).
-        merged_fund = DatabaseFund.objects.filter(id=db.merged_into_id, is_deleted=False).first()
+        # merged fund too -- refuse as long as that merged fund's row still
+        # exists at all, soft-deleted (in trash) or not. A soft-delete can be
+        # undone (trash_restore), so checking is_deleted=False here would let
+        # "delete the merged fund, unarchive the source, restore the merged
+        # fund from trash" put both funds live with the same money. Only a
+        # permanent purge (emptying it from trash) actually removes the row
+        # and nulls merged_into via on_delete=SET_NULL.
+        merged_fund = DatabaseFund.objects.filter(id=db.merged_into_id).first()
         if merged_fund:
             return json_error(
-                f"This fund was merged into {merged_fund.name}; delete that fund to undo the merge",
+                f"This fund was merged into {merged_fund.name}; "
+                "permanently delete that fund (empty it from trash) to undo the merge",
                 400,
             )
     db.is_archived = not db.is_archived
@@ -599,21 +605,17 @@ def transaction_update(request, transaction_id):
     if txn.is_voided:
         return json_error("Cannot edit a voided transaction", 400)
 
-    amount = round(parse_number(body["amount"]) or 0, 2) if "amount" in body else txn.amount
-    amount_error = _amount_error(amount)
-    if amount_error:
-        return amount_error
-    tx_date = txn.date
-    if "date" in body:
-        parsed_date = _parse_iso_datetime(body.get("date"))
-        if parsed_date is None:
-            return json_error("Transaction date is required", 400)
-        tx_date = parsed_date
+    # Validate any amount/date supplied in the body before taking the fund
+    # lock. The values actually written for fields the body omits are
+    # resolved from the fresh, locked row below -- not from this pre-lock
+    # read -- so a racing edit to one of those fields is never clobbered.
+    if "amount" in body:
+        amount_error = _amount_error(round(parse_number(body["amount"]) or 0, 2))
+        if amount_error:
+            return amount_error
+    if "date" in body and _parse_iso_datetime(body.get("date")) is None:
+        return json_error("Transaction date is required", 400)
 
-    sender = str(body.get("sender", txn.sender or "")).strip() or None
-    receiver = str(body.get("receiver", txn.receiver or "")).strip() or None
-    location = str(body.get("location", txn.location or "")).strip() or None
-    notes = str(body.get("notes", txn.notes or "")).strip() or None
     try:
         with transaction.atomic(using=current_org_alias()):
             fund = lock_fund(txn.database_id)
@@ -622,15 +624,25 @@ def transaction_update(request, transaction_id):
             if fund.is_archived:
                 return json_error("This fund is archived", 400)
             # txn was read above without a lock, before the fund was locked.
-            # A void racing this edit in that window would otherwise be
-            # silently undone by the save below. Re-read it under its own
-            # row lock (fund first, then transaction, same order as every
-            # other money write) and re-check it hasn't been voided since.
+            # A void racing this edit in that window would otherwise apply
+            # this edit to a transaction that was voided in the meantime.
+            # Re-read it under its own row lock (fund first, then
+            # transaction, same order as every other money write), re-check
+            # it hasn't been voided since, and resolve every field this PUT
+            # omits from this fresh copy -- not the stale pre-lock read --
+            # so a racing edit to amount/sender/receiver/location/notes is
+            # never overwritten with stale data.
             txn = TransactionFund.objects.select_for_update().filter(id=transaction_id).first()
             if not txn:
                 return json_error("Transaction not found", 404)
             if txn.is_voided:
                 return json_error("Cannot edit a voided transaction", 400)
+            amount = round(parse_number(body["amount"]) or 0, 2) if "amount" in body else txn.amount
+            tx_date = _parse_iso_datetime(body.get("date")) if "date" in body else txn.date
+            sender = str(body.get("sender", txn.sender or "")).strip() or None
+            receiver = str(body.get("receiver", txn.receiver or "")).strip() or None
+            location = str(body.get("location", txn.location or "")).strip() or None
+            notes = str(body.get("notes", txn.notes or "")).strip() or None
             txn.amount = amount
             txn.date = tx_date
             txn.sender = sender

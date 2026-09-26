@@ -861,12 +861,13 @@ or restore.
 **POST** `/databases/<database_id>/archive`
 
 Toggles the archived flag. Unarchiving is refused for a fund whose
-`merged_into` points at a fund that still exists (is not itself deleted): a
-merge keeps the source and target's transactions for history but copies them
-into the merged fund too, so making a merge source live and writable again
-would double-count that money. Delete the merged fund first to undo the
-merge (once it's in trash, `merged_into` no longer points at a live fund and
-unarchiving goes through).
+`merged_into` points at a fund whose row still exists at all, soft-deleted
+(in trash) or not: a merge keeps the source and target's transactions for
+history but copies them into the merged fund too, so making a merge source
+live and writable again would double-count that money. A soft delete can be
+undone, so it isn't enough to lift the block — permanently delete the merged
+fund (empty it from trash) to undo the merge (that purge nulls `merged_into`
+via `ON DELETE SET NULL`, and unarchiving then goes through).
 
 **Response (200):**
 
@@ -876,8 +877,8 @@ unarchiving goes through).
 
 **Error Responses:**
 
-- `400`: This fund was merged into `<merged fund name>`; delete that fund to
-  undo the merge
+- `400`: This fund was merged into `<merged fund name>`; permanently delete
+  that fund (empty it from trash) to undo the merge
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `404`: Database not found
@@ -1077,13 +1078,13 @@ one. Omitting it, or sending `null`, is treated as `{}`.
 **PUT** `/transactions/<transaction_id>`
 
 Cannot edit a voided transaction. Editing the amount or date recalculates
-running balances for the whole fund. The edit is refused only when it would
-make the fund's balance *worse* than it already is (comparing the
-recalculated balance against the fund's current one) — not merely negative.
-A fund can already be negative on its own (voiding a spent credit has no
-balance check), and in that case a notes-only edit, or an amount edit that
-raises the balance while leaving it negative, still goes through; only an
-edit that lowers it further is rejected.
+running balances for the whole fund. The edit is refused only when the
+recalculated balance would be below 0 *and* lower than the fund's current
+balance — not merely negative on its own. A fund can already be negative
+(voiding a spent credit has no balance check), and in that case a
+notes-only edit, or an amount edit that raises the balance while leaving it
+negative, still goes through; only an edit that lowers it further is
+rejected.
 
 **Request Body:**
 
