@@ -46,7 +46,7 @@ export default function DashboardView({ databases, overview, theme }) {
   const allTxns = useMemo(
     () =>
       activeDbs.flatMap(db =>
-        (db.transactions || []).filter(t => !t.is_voided)
+        (db.transactions || []).filter(t => !t.is_voided && t.approved)
       ),
     [activeDbs]
   );

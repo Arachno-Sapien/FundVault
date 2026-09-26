@@ -144,14 +144,14 @@ Or, on Windows, run `install.bat` once and `run.bat` every time after —
 `run.bat` also brings up the two Docker databases automatically.
 
 6. **Create your first organisation** — open `http://localhost:3001`, choose
-   **Create organisation**, and paste the dev tenant's connection string:
+   **Create an organisation**, and paste the dev tenant's connection string:
 
    ```text
    postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev
    ```
 
-   Use `127.0.0.1`, not `localhost` — the dev SSRF allowlist only permits the
-   exact `127.0.0.1:5434` pair.
+   Use `127.0.0.1`, not `localhost` — the dev SSRF allowlist (active only with
+   `DEBUG=True`) matches exact `127.0.0.1` host:port pairs, not hostnames.
 
 AI keys and receipt storage credentials are **not** environment variables —
 each organisation configures its own from its org settings page after

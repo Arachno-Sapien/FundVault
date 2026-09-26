@@ -184,8 +184,10 @@ export default function AppModals({
     ]);
     // Prefix a cell that could be read as a formula by Excel/Sheets (e.g. a
     // Member's note of "=HYPERLINK(...)") with a quote so it opens as text.
+    // Skip the prefix for plain numbers so negative balances export as numbers.
     const csvSafe = value => {
       const str = String(value);
+      if (/^-?\d+(\.\d+)?$/.test(str)) return str;
       return /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
     };
     const csv = [headers, ...rows].map(row => row.map(col => `"${csvSafe(col).replaceAll('"', '""')}"`).join(",")).join("\n");
@@ -233,7 +235,7 @@ export default function AppModals({
       body: filtered.map((txn, idx) => [
         idx + 1,
         formatDateShort(txn.date),
-        txn.type.toUpperCase(),
+        txn.type.toUpperCase() + (!txn.approved ? " (pending)" : ""),
         Number(txn.amount || 0).toFixed(2),
         txn.sender || "-",
         txn.receiver || "-",

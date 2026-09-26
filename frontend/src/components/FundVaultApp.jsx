@@ -881,7 +881,7 @@ export default function FundVaultApp() {
             <tr>
               <td>${idx + 1}</td>
               <td>${esc(new Date(txn.date).toLocaleDateString("en-IN"))}</td>
-              <td class="${esc(txn.type)}">${esc(String(txn.type).toUpperCase())}</td>
+              <td class="${esc(txn.type)}">${esc(String(txn.type).toUpperCase())}${!txn.approved ? esc(" (pending)") : ""}</td>
               <td class="${esc(txn.type)}">${esc(fmt(txn.amount))}</td>
               <td>${esc(txn.sender || "-")}</td>
               <td>${esc(txn.receiver || "-")}</td>
