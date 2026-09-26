@@ -207,10 +207,14 @@ export default function DatabaseView({
         <div className="section-label ledger-label">
           Transaction Ledger
         </div>
-        {permissions.createTxn && (
-          <button className="btn btn-primary btn-sm" onClick={onOpenNewTxn}>
-            + New Transaction
-          </button>
+        {database.is_archived ? (
+          <div className="db-subtext">Archived — read-only</div>
+        ) : (
+          permissions.createTxn && (
+            <button className="btn btn-primary btn-sm" onClick={onOpenNewTxn}>
+              + New Transaction
+            </button>
+          )
         )}
       </div>
 
@@ -276,7 +280,7 @@ export default function DatabaseView({
                 <td>{fmt(txn.running_balance)}</td>
                 <td>
                   <div className="row-actions">
-                    {!txn.is_voided && permissions.modifyTxn && (
+                    {!database.is_archived && !txn.is_voided && permissions.modifyTxn && (
                       <>
                         <button className="btn btn-ghost btn-sm" onClick={() => onOpenEditTxn(txn)}>
                           ✏️
@@ -286,12 +290,12 @@ export default function DatabaseView({
                         </button>
                       </>
                     )}
-                    {txn.is_voided && permissions.modifyTxn && (
+                    {!database.is_archived && txn.is_voided && permissions.modifyTxn && (
                       <button className="btn btn-danger btn-sm" onClick={() => onDeleteVoidedTxn(txn.id)} title="Delete voided transaction">
                         🗑
                       </button>
                     )}
-                    {txn.requires_approval && !txn.approved && !txn.is_voided && permissions.approve && (
+                    {!database.is_archived && txn.requires_approval && !txn.approved && !txn.is_voided && permissions.approve && (
                       <button className="btn btn-outline btn-sm" onClick={() => onApproveTxn(txn.id)}>
                         ✓
                       </button>

@@ -5,7 +5,7 @@ import { useState } from "react";
 import { createOrg, validateConnection } from "lib/api";
 
 const PRESETS = [
-  { id: "supabase", label: "Supabase", hint: "Project settings → Database → Connection string → URI. Use the pooled string on port 6543." },
+  { id: "supabase", label: "Supabase", hint: "Project settings → Database → Connect → Session pooler (port 5432). The direct db.<ref>.supabase.co string is IPv6-only and won't work." },
   { id: "neon", label: "Neon", hint: "Dashboard → Connection Details → Connection string." },
   { id: "railway", label: "Railway", hint: "Postgres service → Variables → DATABASE_URL." },
   { id: "other", label: "Other Postgres", hint: "Any postgres:// URL your server can reach." }

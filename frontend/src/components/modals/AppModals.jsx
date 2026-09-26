@@ -665,7 +665,7 @@ export default function AppModals({
             <label>Source Database</label>
             <select value={state.mergeForm.sourceId} onChange={e => actions.setMergeForm(prev => ({ ...prev, sourceId: e.target.value }))}>
               <option value="">Select source</option>
-              {state.databases.filter(db => !db.is_deleted).map(db => (
+              {state.databases.filter(db => !db.is_deleted && !db.is_archived).map(db => (
                 <option key={db.id} value={db.id}>
                   {db.name}
                 </option>
@@ -676,7 +676,7 @@ export default function AppModals({
             <label>Target Database</label>
             <select value={state.mergeForm.targetId} onChange={e => actions.setMergeForm(prev => ({ ...prev, targetId: e.target.value }))}>
               <option value="">Select target</option>
-              {state.databases.filter(db => !db.is_deleted).map(db => (
+              {state.databases.filter(db => !db.is_deleted && !db.is_archived).map(db => (
                 <option key={db.id} value={db.id}>
                   {db.name}
                 </option>
