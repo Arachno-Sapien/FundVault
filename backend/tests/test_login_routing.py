@@ -123,6 +123,19 @@ class LoginTests(OrgTestMixin, TestCase):
     def test_wrong_password_is_refused(self):
         self.assertEqual(self._login(password="wrong").status_code, 401)
 
+    def test_non_object_login_body_is_a_normal_400_not_a_500(self):
+        # The middleware parses orgId out of the body itself, before
+        # auth_required ever runs, and used to skip parse_body's dict guard.
+        for body in ("[]", "null", '"just a string"', "42"):
+            with self.subTest(body=body):
+                response = self.client.post(
+                    "/api/auth/login", data=body, content_type="application/json"
+                )
+                self.assertEqual(response.status_code, 400, response.content)
+                self.assertEqual(
+                    json.loads(response.content)["error"], "Choose an organisation first"
+                )
+
     def test_login_refreshes_the_email_index(self):
         before = EmailIndex.objects.get(email="alice@example.com").last_seen_at
         self._login()

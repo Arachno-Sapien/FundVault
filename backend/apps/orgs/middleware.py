@@ -7,6 +7,7 @@ from django.conf import settings
 from django.db import OperationalError
 from django.http import JsonResponse
 
+from apps.common.utils import parse_body
 from apps.orgs.connections import InvalidConnectionString, ensure_connection
 from apps.orgs.context import reset_current_org, set_current_org
 from apps.orgs.models import Org
@@ -110,12 +111,11 @@ class OrgContextMiddleware:
         """Login carries orgId in the body — there is no token yet."""
         if request.path != "/api/auth/login":
             return None
-        import json as _json
-
-        try:
-            payload = _json.loads(request.body.decode("utf-8") or "{}")
-        except ValueError:
-            return None
+        # parse_body already guards against a non-dict body (a JSON array,
+        # string, number, or null), so a malformed POST /api/auth/login gets
+        # the same "Choose an organisation first" 400 as one with no orgId,
+        # never a 500 from .get() on a list here.
+        payload = parse_body(request)
         org_id = str(payload.get("orgId", "")).strip()
         if not org_id:
             return JsonResponse({"error": "Choose an organisation first"}, status=400)
