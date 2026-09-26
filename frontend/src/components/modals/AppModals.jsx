@@ -182,7 +182,13 @@ export default function AppModals({
       txn.notes || "",
       Number(txn.running_balance || 0).toFixed(2)
     ]);
-    const csv = [headers, ...rows].map(row => row.map(col => `"${String(col).replaceAll('"', '""')}"`).join(",")).join("\n");
+    // Prefix a cell that could be read as a formula by Excel/Sheets (e.g. a
+    // Member's note of "=HYPERLINK(...)") with a quote so it opens as text.
+    const csvSafe = value => {
+      const str = String(value);
+      return /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+    };
+    const csv = [headers, ...rows].map(row => row.map(col => `"${csvSafe(col).replaceAll('"', '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
