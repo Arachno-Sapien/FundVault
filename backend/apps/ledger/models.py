@@ -21,6 +21,14 @@ class DatabaseFund(models.Model):
     approval_threshold = models.FloatField(default=0)
     is_archived = models.BooleanField(default=False)
     is_deleted = models.BooleanField(default=False)
+    merged_into = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        db_column="merged_into",
+        related_name="merge_sources",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
