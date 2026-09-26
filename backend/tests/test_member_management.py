@@ -215,3 +215,21 @@ class MemberManagementTests(OrgTestMixin, TestCase):
 
     def test_owner_can_reset_their_own_password(self):
         self.assertEqual(self._reset_password(self.owner, "u_owner").status_code, 200)
+
+    def test_deleting_a_user_reassigns_their_trash_items_instead_of_deleting_them(self):
+        # Deleting the TrashItem outright left whatever that user had soft-
+        # deleted unrestorable forever -- the row is what the trash endpoints
+        # key on, so losing it orphans the underlying fund in the trash with
+        # no way back.
+        from apps.ledger.models import TrashItem
+
+        with org_context(ORG_ALIAS):
+            TrashItem.objects.create(
+                id="tr1", entity_type="database",
+                entity_data=json.dumps({"id": "f1"}), deleted_by_id="u_member",
+            )
+        response = self._delete(self.admin, "u_member")
+        self.assertEqual(response.status_code, 200, response.content)
+        with org_context(ORG_ALIAS):
+            item = TrashItem.objects.get(id="tr1")
+        self.assertEqual(item.deleted_by_id, "u_admin")

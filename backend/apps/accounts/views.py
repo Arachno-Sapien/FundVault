@@ -277,7 +277,11 @@ def admin_user_detail(request, user_id):
         with transaction.atomic(using=current_org_alias()):
             from apps.ledger.models import AuditLog, TrashItem
 
-            TrashItem.objects.filter(deleted_by_id=target.id).delete()
+            # Reassigned, not deleted: their soft-deleted funds must stay
+            # restorable by whoever is left to administer the org, not become
+            # permanently stuck in trash just because the deleter's account
+            # is gone.
+            TrashItem.objects.filter(deleted_by_id=target.id).update(deleted_by_id=request.fv_user.id)
             AuditLog.objects.filter(user_id=target.id).update(user_id=None)
             Session.objects.filter(user_id=target.id).delete()
             # Discovery row lives in the control plane, not this tenant -- but
