@@ -17,6 +17,7 @@ from apps.common.utils import libpq_options
 MAX_TENANT_CONNECTIONS = 50
 
 _lru = OrderedDict()
+_urls = {}
 _lock = threading.Lock()
 
 
@@ -79,11 +80,23 @@ def ensure_connection(org):
     alias = alias_for_org(org.id)
     with _lock:
         if alias in connections.databases and alias in _lru:
-            _lru.move_to_end(alias, last=True)
-            return alias
+            if _urls.get(alias) == org.db_connection:
+                _lru.move_to_end(alias, last=True)
+                return alias
+            # This process cached a connection for org.db_connection as it
+            # stood on some earlier request, but the org has since been
+            # repointed at a different database (e.g. by a request that
+            # landed on a different gunicorn worker -- migrate_org_database
+            # only updates the config in the worker that ran it). Serving
+            # this alias further would mean the session/user rows this
+            # request looks up are read from the wrong database, so drop the
+            # stale connection and rebuild from the current URL below.
+            _close_and_forget(alias)
+            _lru.pop(alias, None)
 
         if alias not in connections.databases:
             connections.databases[alias] = build_config(org.db_connection)
+        _urls[alias] = org.db_connection
         _lru[alias] = True
         _lru.move_to_end(alias, last=True)
         while len(_lru) > MAX_TENANT_CONNECTIONS:
@@ -95,6 +108,7 @@ def ensure_connection(org):
 def drop_connection(alias):
     with _lock:
         _lru.pop(alias, None)
+        _urls.pop(alias, None)
         _close_and_forget(alias)
 
 

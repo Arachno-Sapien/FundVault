@@ -156,6 +156,26 @@ class ConnectionRegistryTests(TestCase):
         # to it, not just to aliases that started out in the "normal" path.
         self.assertNotIn(alias, connections.databases)
 
+    def test_ensure_connection_rebuilds_a_repointed_org(self):
+        # Reproduces the real bug: migrate_org_database() (apps/orgs/provisioning.py)
+        # updates connections.databases[alias] and org.db_connection in whichever
+        # worker process ran the repoint, but a *different* worker's ensure_connection
+        # used to treat "alias already in connections.databases and _lru" as reason
+        # enough to keep serving its own stale, pre-repoint connection forever --
+        # so requests handled by that other worker kept hitting the old database
+        # (e.g. failing to find a session created moments earlier on the fresh one).
+        alias = tenant_connections.ensure_connection(self.org)
+        old_name = connections.databases[alias]["NAME"]
+
+        new_url = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev?options=-c%20search_path%3Dother"
+        self.org.db_connection = new_url
+        self.org.save(update_fields=["db_connection"])
+
+        rebuilt = tenant_connections.ensure_connection(self.org)
+        self.assertEqual(rebuilt, alias)
+        self.assertEqual(connections.databases[alias]["OPTIONS"].get("options"), "-c search_path=other")
+        self.assertEqual(connections.databases[alias]["NAME"], old_name)
+
     def test_registry_evicts_beyond_the_cap(self):
         made = []
         for index in range(tenant_connections.MAX_TENANT_CONNECTIONS + 5):
