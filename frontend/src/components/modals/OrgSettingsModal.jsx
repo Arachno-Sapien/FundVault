@@ -18,7 +18,27 @@ export default function OrgSettingsModal({ open, onClose, request, toast }) {
   useEffect(() => {
     if (!open) return;
     request("/orgs/settings")
-      .then(setCurrent)
+      .then(data => {
+        setCurrent(data);
+        // Pre-fill only the non-secret fields the API actually returns in
+        // full (access_key/secret_key come back masked, never usable here).
+        if (data.storage) {
+          setStorage(s => ({
+            ...s,
+            endpoint_url: data.storage.endpoint_url,
+            bucket: data.storage.bucket,
+            region: data.storage.region || "auto",
+          }));
+        }
+        if (data.ai?.primary) {
+          setAi(a => ({
+            ...a,
+            provider: data.ai.primary.provider,
+            base_url: data.ai.primary.base_url || "",
+            model: data.ai.primary.model || "",
+          }));
+        }
+      })
       .catch(err => toast(err.message, "error"));
   }, [open]);
 
