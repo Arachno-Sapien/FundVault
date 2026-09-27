@@ -29,6 +29,7 @@ _IPV6_ONLY_MESSAGE = (
     "That host has only an IPv6 address, which this server cannot reach. For a database, "
     "use your provider's IPv4 connection pooler instead (on Supabase: the Session pooler string)."
 )
+_HOST_NOT_FOUND_MESSAGE = "Host not found — check the hostname in the connection string."
 
 
 def _is_internal_address(ip_str):
@@ -105,7 +106,15 @@ def blocked_https_url_message(url):
         return "That URL must use https."
     if not host:
         return "That URL has no host."
-    return resolve_target(host, port)[1]
+    ip, blocked = resolve_target(host, port)
+    # Fail closed: a host that doesn't resolve at all is refused here rather
+    # than let through as "not blocked" -- the caller (check_ai_config /
+    # check_storage) would otherwise go on to dial it for real, letting the
+    # SDK's own DNS lookup resolve (and connect to) whatever the name answers
+    # with at that later moment, unchecked.
+    if ip is None:
+        return blocked or _HOST_NOT_FOUND_MESSAGE
+    return None
 
 
 class ProvisioningError(Exception):
@@ -117,6 +126,9 @@ class ConnectionCheck:
     ok: bool
     message: str
     version: str = ""
+    # The exact address resolve_target validated, for callers (provision_org,
+    # migrate_org_database) that need to pin a later connection to it.
+    ip: str = ""
 
 
 def _friendly(exc):
@@ -134,7 +146,7 @@ def _friendly(exc):
     if "password authentication failed" in lowered:
         return "Authentication failed — check the username and password."
     if "could not translate host name" in lowered or "name or service not known" in lowered:
-        return "Host not found — check the hostname in the connection string."
+        return _HOST_NOT_FOUND_MESSAGE
     if "network is unreachable" in lowered:
         return (
             "Network unreachable — if the host is IPv6-only, use your provider's IPv4 "
@@ -171,16 +183,22 @@ def check_connection(url):
         return ConnectionCheck(ok=False, message=str(exc))
 
     ip, blocked = resolve_target(config["HOST"], int(config["PORT"]))
-    if blocked:
-        return ConnectionCheck(ok=False, message=blocked)
+    if ip is None:
+        # Fail closed: a host that fails to resolve is refused here rather
+        # than dialled with no hostaddr pin below, which would let psycopg
+        # re-resolve it independently and connect wherever THAT lookup
+        # points -- unchecked. This also matters for a libpq multi-host
+        # string (host1,host2 as a single HOST value, which Python's own
+        # getaddrinfo cannot resolve as one name): psycopg would otherwise
+        # walk it host by host, skipping the internal-address check above
+        # for every host after the first.
+        return ConnectionCheck(ok=False, message=blocked or _HOST_NOT_FOUND_MESSAGE)
 
     # hostaddr pins the socket to the address resolve_target just validated,
     # so a low-TTL record cannot answer this connect() with an internal
     # address after passing the check above. `host` is still passed, because
     # that is what drives TLS SNI and certificate hostname verification.
-    # hostaddr is omitted when the name did not resolve at all — psycopg then
-    # resolves it itself and fails with its own "host not found".
-    extra = {"hostaddr": ip} if ip else {}
+    extra = {"hostaddr": ip}
     # config["OPTIONS"] carries the libpq parameters parsed out of the URL's
     # query string (sslmode above all). Without them this probe would dial in
     # plaintext and report success while the real connection — which does
@@ -201,7 +219,9 @@ def check_connection(url):
                 version = cursor.fetchone()[0]
                 cursor.execute("CREATE TABLE _fundvault_probe (id integer)")
                 cursor.execute("DROP TABLE _fundvault_probe")
-        return ConnectionCheck(ok=True, message="Connected, and able to create tables.", version=version)
+        return ConnectionCheck(
+            ok=True, message="Connected, and able to create tables.", version=version, ip=ip
+        )
     except Exception as exc:
         return ConnectionCheck(ok=False, message=_friendly(exc))
 
@@ -221,12 +241,23 @@ def provision_org(name, url, owner_email):
 
     org_id = uid()
     alias = alias_for_org(org_id)
-    connections.databases[alias] = tenant_connections.build_config(url)
+    config = tenant_connections.build_config(url)
+    # Pin the migrate connection to the address check_connection just
+    # validated -- otherwise a low-TTL DNS record could answer this
+    # connection with a different (possibly internal) address than the one
+    # the SSRF check above approved (the same rebinding check_connection's
+    # own probe already guards against).
+    config["OPTIONS"]["hostaddr"] = check.ip
+    connections.databases[alias] = config
     try:
         call_command("migrate", database=alias, verbosity=0)
     except Exception as exc:
         drop_connection(alias)
         raise ProvisioningError(f"Could not build the schema: {_friendly(exc)}")
+    # Only migrate is pinned. ensure_connection keeps this config as-is, so
+    # leaving hostaddr in would pin this worker's runtime reconnects too and
+    # break when the provider's IP changes.
+    config["OPTIONS"].pop("hostaddr", None)
 
     try:
         # The create runs in its own savepoint (matching the pattern in
@@ -279,12 +310,17 @@ def migrate_org_database(org, url):
     # below would not stop `migrate` from reusing it -- close it first so the
     # new config actually takes effect.
     drop_connection(alias)
-    connections.databases[alias] = tenant_connections.build_config(url)
+    config = tenant_connections.build_config(url)
+    # Pin the migrate connection to the validated address -- see the matching
+    # comment in provision_org above.
+    config["OPTIONS"]["hostaddr"] = check.ip
+    connections.databases[alias] = config
     try:
         call_command("migrate", database=alias, verbosity=0)
     except Exception as exc:
         drop_connection(alias)
         raise ProvisioningError(f"Could not prepare that database: {_friendly(exc)}")
+    config["OPTIONS"].pop("hostaddr", None)  # see provision_org
 
     org.db_connection = url
     org.save(update_fields=["db_connection"])

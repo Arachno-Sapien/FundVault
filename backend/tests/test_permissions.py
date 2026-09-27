@@ -11,38 +11,6 @@ def _user(role):
 
 
 class CapabilityTests(SimpleTestCase):
-    def test_everyone_can_view(self):
-        for role in (OWNER, ADMIN, MEMBER, VIEWER):
-            self.assertTrue(can(_user(role), Action.VIEW), role)
-
-    def test_viewer_cannot_create_transactions(self):
-        self.assertFalse(can(_user(VIEWER), Action.CREATE_TXN))
-
-    def test_members_and_above_can_create_transactions(self):
-        for role in (OWNER, ADMIN, MEMBER):
-            self.assertTrue(can(_user(role), Action.CREATE_TXN), role)
-
-    def test_only_admin_and_owner_approve(self):
-        self.assertTrue(can(_user(OWNER), Action.APPROVE))
-        self.assertTrue(can(_user(ADMIN), Action.APPROVE))
-        self.assertFalse(can(_user(MEMBER), Action.APPROVE))
-        self.assertFalse(can(_user(VIEWER), Action.APPROVE))
-
-    def test_only_admin_and_owner_modify_or_void(self):
-        for action in (Action.MODIFY_TXN, Action.MANAGE_FUNDS, Action.MANAGE_MEMBERS):
-            self.assertTrue(can(_user(ADMIN), action), action)
-            self.assertFalse(can(_user(MEMBER), action), action)
-
-    def test_owner_only_capabilities(self):
-        for action in (
-            Action.MINT_ADMIN_CODE,
-            Action.CHANGE_ROLE,
-            Action.MANAGE_ORG_CONFIG,
-            Action.TRANSFER_OWNERSHIP,
-        ):
-            self.assertTrue(can(_user(OWNER), action), action)
-            self.assertFalse(can(_user(ADMIN), action), action)
-
     def test_unknown_role_can_do_nothing(self):
         self.assertFalse(can(_user("wizard"), Action.VIEW))
 

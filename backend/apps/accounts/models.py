@@ -23,10 +23,6 @@ class User(models.Model):
         db_table = "users"
         indexes = [models.Index(fields=["is_active"], name="idx_users_active")]
 
-    @property
-    def is_authenticated(self):
-        return True
-
 
 class Session(models.Model):
     id = models.CharField(max_length=64, primary_key=True)

@@ -15,6 +15,7 @@ from fundvault_backend.settings import _parse_database_url
 _DEV_DEFAULTS = {
     "fundvault-django-secret-change-in-production",
     "fundvault-secret-key-change-in-production",
+    "fundvault-jwt-secret-change-in-production",
     "change-me-in-production",
 }
 
@@ -83,17 +84,6 @@ SECURE_HSTS_PRELOAD = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 X_FRAME_OPTIONS = "DENY"
-
-DATA_UPLOAD_MAX_MEMORY_SIZE = 6 * 1024 * 1024  # receipts are capped at 5 MB
-
-STORAGES = {
-    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
-}
-# A new list, not insert(): MIDDLEWARE is the base module's own list object.
-_after_cors = MIDDLEWARE.index("corsheaders.middleware.CorsMiddleware") + 1
-MIDDLEWARE = [
-    *MIDDLEWARE[:_after_cors], "whitenoise.middleware.WhiteNoiseMiddleware", *MIDDLEWARE[_after_cors:]
-]
 
 LOGGING = {
     "version": 1,

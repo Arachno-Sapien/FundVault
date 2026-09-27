@@ -1,11 +1,13 @@
 import json
+from datetime import timedelta
 
 from django.db import connections
 from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from apps.accounts.models import User
+from apps.accounts.models import Session, User
+from apps.common.auth import create_session_token, hash_password
 from apps.ledger.models import DatabaseFund, TransactionFund
 from apps.orgs.context import org_context
 from apps.orgs.models import EmailIndex, Org
@@ -75,6 +77,9 @@ class MemberManagementTests(OrgTestMixin, TestCase):
             HTTP_AUTHORIZATION=f"Bearer {token}",
         )
 
+    def _me(self, token):
+        return self.client.get("/api/auth/me", HTTP_AUTHORIZATION=f"Bearer {token}")
+
     # --- email_index follows the member ---
 
     def test_removing_a_member_ends_their_org_discovery(self):
@@ -120,6 +125,19 @@ class MemberManagementTests(OrgTestMixin, TestCase):
 
     def test_owner_cannot_deactivate_themselves(self):
         self.assertEqual(self._put(self.owner, "u_owner", {"is_active": False}).status_code, 400)
+
+    def test_owner_can_rename_themselves(self):
+        # Regression: the Owner-role checks used to fire unconditionally on
+        # every edit of the Owner's own row, even one that touches neither
+        # role nor is_active.
+        response = self._put(self.owner, "u_owner", {"username": "renamed_owner"})
+        self.assertEqual(response.status_code, 200, response.content)
+
+    def test_admin_cannot_edit_the_owners_row(self):
+        # An Admin (MANAGE_MEMBERS) must not be able to touch the Owner's row
+        # at all -- not even a harmless rename -- without TRANSFER_OWNERSHIP.
+        response = self._put(self.admin, "u_owner", {"username": "renamed_by_admin"})
+        self.assertEqual(response.status_code, 403)
 
     def test_admin_cannot_remove_the_only_owner(self):
         response = self._delete(self.admin, "u_owner")
@@ -207,6 +225,37 @@ class MemberManagementTests(OrgTestMixin, TestCase):
 
     def test_admin_can_reset_a_members_password(self):
         self.assertEqual(self._reset_password(self.admin, "u_member").status_code, 200)
+
+    def test_resetting_a_users_password_invalidates_their_old_token(self):
+        self.assertEqual(self._me(self.member).status_code, 200)
+        self.assertEqual(self._reset_password(self.admin, "u_member").status_code, 200)
+        self.assertEqual(self._me(self.member).status_code, 401)
+
+    def test_deactivating_a_member_invalidates_their_token(self):
+        self.assertEqual(self._me(self.member).status_code, 200)
+        self.assertEqual(self._put(self.admin, "u_member", {"is_active": False}).status_code, 200)
+        self.assertEqual(self._me(self.member).status_code, 401)
+
+    def test_password_change_keeps_the_current_token_and_invalidates_other_sessions(self):
+        # make_user stores a dummy, unusable password_hash ("x") -- give this
+        # member a real one so `currentPassword` can actually verify.
+        with org_context(ORG_ALIAS):
+            User.objects.filter(id="u_member").update(password_hash=hash_password("oldpass123"))
+        # A second, independent session for the same member (e.g. another
+        # device already logged in).
+        other_token = create_session_token("u_member", self.org.id)
+        with org_context(ORG_ALIAS):
+            Session.objects.create(
+                id="s_other_device", user_id="u_member", token=other_token,
+                expires_at=timezone.now() + timedelta(hours=1),
+            )
+        response = self._put_me(self.member, {
+            "username": "u_member", "email": "u_member@example.com",
+            "currentPassword": "oldpass123", "newPassword": "newpass123", "confirmPassword": "newpass123",
+        })
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(self._me(self.member).status_code, 200)
+        self.assertEqual(self._me(other_token).status_code, 401)
 
     def test_admin_cannot_reset_the_owners_password(self):
         # Otherwise MANAGE_MEMBERS (Admin) is a path to the Owner account:

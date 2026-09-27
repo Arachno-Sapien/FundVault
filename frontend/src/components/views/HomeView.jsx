@@ -43,7 +43,11 @@ export default function HomeView({
       <div className="db-grid">
         {activeDbs.length === 0 && (
           <div className="db-card" style={{ gridColumn: "1/-1", textAlign: "center" }}>
-            {loading ? "Loading…" : <>No databases yet. Click <strong>+ New Database</strong> to get started.</>}
+            {loading
+              ? "Loading…"
+              : canManageFunds
+                ? <>No databases yet. Click <strong>+ New Database</strong> to get started.</>
+                : "No databases yet. Ask an Admin to create one."}
           </div>
         )}
 
@@ -54,6 +58,14 @@ export default function HomeView({
               key={db.id}
               className={`db-card ${db.is_archived ? "archived" : ""}`}
               onClick={() => onOpenDb(db.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={e => {
+                if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+                  e.preventDefault();
+                  onOpenDb(db.id);
+                }
+              }}
             >
               <div className="db-card-head">
                 <div className="db-card-name">◈ {db.name}</div>

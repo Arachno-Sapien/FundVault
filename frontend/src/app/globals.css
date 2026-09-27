@@ -107,6 +107,9 @@ header {
   padding: 6px 12px;
   cursor: pointer;
   transition: all 0.2s;
+  color: inherit;
+  font-size: inherit;
+  text-align: left;
 }
 
 .user-menu-wrap {
@@ -927,6 +930,24 @@ tr:hover td {
 
 .toast.warning {
   border-color: #ffb300;
+}
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border: 2px solid var(--muted);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 1024px) {

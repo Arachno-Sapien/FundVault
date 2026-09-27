@@ -147,13 +147,16 @@ class DatabaseSettingsTests(OrgTestMixin, TestCase):
     @mock.patch("apps.orgs.provisioning.drop_connection")
     def test_owner_can_repoint_the_database(self, _mock_drop):
         # See MigrateOrgDatabaseTests.test_success_saves_the_new_connection_string
-        # for why TENANT_URL stands in as the "new" target and why
+        # for why this uses a URL that differs from the org's starting
+        # TENANT_URL (byte-for-byte reuse would pass even if the save were
+        # silently skipped) but still reaches the same test database, and why
         # drop_connection is mocked here: this org's alias is one Django's
         # TestCase (via OrgTestMixin) wraps in its own atomic block.
-        response = self._put({"database": {"databaseUrl": TENANT_URL}})
+        new_url = f"{TENANT_URL}?application_name=fundvault-repoint"
+        response = self._put({"database": {"databaseUrl": new_url}})
         self.assertEqual(response.status_code, 200, response.content)
         self.assertIn("db_connection", response.json()["updated"])
-        self.assertEqual(Org.objects.get(id=ORG_ID).db_connection, TENANT_URL)
+        self.assertEqual(Org.objects.get(id=ORG_ID).db_connection, new_url)
 
 
 class DatabaseSettingsUnmockedTests(OrgTestMixin, TransactionTestCase):
@@ -182,6 +185,59 @@ class DatabaseSettingsUnmockedTests(OrgTestMixin, TransactionTestCase):
         self.assertTrue(
             AuditLog.objects.using("org_o1").filter(action="update", entity_type="org").exists()
         )
+
+
+class AIConfigFallbackCarryoverTests(OrgTestMixin, TestCase):
+    """The UI's AI settings form only ever sends {"primary": ...} (see
+    OrgSettingsModal.jsx) -- a wholesale overwrite of body["ai"] would
+    silently drop a fallback configured earlier through this same wholesale
+    overwrite.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        # gemini needs no base_url (fixed by the SDK, not org-supplied), so
+        # this doesn't also exercise the outbound-host check -- that's
+        # OutboundTargetTests' job below.
+        Org.objects.create(
+            id="o1", name="Acme", slug="acme", owner_email="o@example.com",
+            db_connection=TENANT_URL,
+            ai_config=json.dumps({
+                "primary": {"provider": "gemini", "model": "old-primary", "api_key": "k1"},
+                "fallback": {"provider": "gemini", "model": "old-fallback", "api_key": "k2"},
+            }),
+        )
+        self.owner = self.make_user("u_owner", "owner")
+
+    def test_updating_only_primary_keeps_the_stored_fallback(self):
+        with mock.patch("google.genai.Client"):
+            response = self.client.put(
+                "/api/orgs/settings",
+                data=json.dumps({"ai": {
+                    "primary": {"provider": "gemini", "model": "new-primary", "api_key": "k3"},
+                }}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {self.owner}",
+            )
+        self.assertEqual(response.status_code, 200, response.content)
+        stored = json.loads(Org.objects.get(id=ORG_ID).ai_config)
+        self.assertEqual(stored["primary"]["model"], "new-primary")
+        self.assertEqual(stored["fallback"]["model"], "old-fallback")
+
+    def test_an_explicit_null_fallback_still_clears_it(self):
+        with mock.patch("google.genai.Client"):
+            response = self.client.put(
+                "/api/orgs/settings",
+                data=json.dumps({"ai": {
+                    "primary": {"provider": "gemini", "model": "new-primary", "api_key": "k3"},
+                    "fallback": None,
+                }}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {self.owner}",
+            )
+        self.assertEqual(response.status_code, 200, response.content)
+        stored = json.loads(Org.objects.get(id=ORG_ID).ai_config)
+        self.assertIsNone(stored.get("fallback"))
 
 
 # Anyone can become an Owner for free -- POST /api/orgs/create is

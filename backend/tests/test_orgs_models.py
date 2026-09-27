@@ -71,21 +71,6 @@ class JoinCodeTests(TestCase):
         defaults.update(overrides)
         return JoinCode.objects.create(**defaults)
 
-    def test_fresh_code_is_usable(self):
-        self.assertTrue(self._code().is_usable())
-
-    def test_expired_code_is_not_usable(self):
-        code = self._code(expires_at=timezone.now() - timedelta(seconds=1))
-        self.assertFalse(code.is_usable())
-
-    def test_exhausted_code_is_not_usable(self):
-        code = self._code(max_uses=1)
-        code.consume()
-        self.assertFalse(code.is_usable())
-
-    def test_revoked_code_is_not_usable(self):
-        self.assertFalse(self._code(revoked=True).is_usable())
-
     def test_consume_increments_uses(self):
         code = self._code(max_uses=3)
         code.consume()

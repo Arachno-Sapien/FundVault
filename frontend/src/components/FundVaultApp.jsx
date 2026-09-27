@@ -12,7 +12,7 @@ import DatabaseView from "components/views/DatabaseView";
 import HomeView from "components/views/HomeView";
 import TrashView from "components/views/TrashView";
 import { apiRequest, uploadReceipt } from "lib/api";
-import { fmt, formatDate, nowInput } from "lib/format";
+import { fmt, formatDate, nowInput, toLocalInput } from "lib/format";
 import { ACTIONS, can } from "lib/permissions";
 
 // chart.js is only needed on the Dashboard tab, so it stays out of the first load.
@@ -28,6 +28,23 @@ const defaultTxnFilters = {
   amountMax: ""
 };
 
+const blankCreateDbForm = () => ({ name: "", description: "", lowBalanceThreshold: "", approvalThreshold: "" });
+
+const blankTxnForm = () => ({
+  type: "",
+  amount: "",
+  date: nowInput(),
+  sender: "",
+  receiver: "",
+  mode: "electronic",
+  modeData: { elecId: "" },
+  location: "",
+  notes: "",
+  receiptImage: null
+});
+
+const blankRecurringForm = () => ({ type: "", amount: "", frequency: "monthly", description: "", nextRun: nowInput().slice(0, 10) });
+
 // The print window shares this origin, so any user text written into it must
 // be escaped or a Member's sender field runs script with an Owner's token.
 const esc = value =>
@@ -39,7 +56,6 @@ export default function FundVaultApp() {
   const [token, setToken] = useState("");
   const [currentUser, setCurrentUser] = useState(null);
   const [currentOrg, setCurrentOrg] = useState(null);
-  const [userDropdownOpen, setUserDropdownOpen] = useState(false);
 
   const [profileForm, setProfileForm] = useState({
     username: "",
@@ -62,25 +78,14 @@ export default function FundVaultApp() {
   const [txnFilters, setTxnFilters] = useState(defaultTxnFilters);
   const [auditFilters, setAuditFilters] = useState({ search: "", action: "" });
 
-  const [createDbForm, setCreateDbForm] = useState({ name: "", description: "", lowBalanceThreshold: "", approvalThreshold: "" });
+  const [createDbForm, setCreateDbForm] = useState(blankCreateDbForm);
   const [editDbForm, setEditDbForm] = useState({ name: "", description: "", lowBalanceThreshold: "", approvalThreshold: "" });
-  const [txnForm, setTxnForm] = useState({
-    type: "",
-    amount: "",
-    date: nowInput(),
-    sender: "",
-    receiver: "",
-    mode: "electronic",
-    modeData: { elecId: "" },
-    location: "",
-    notes: "",
-    receiptImage: null
-  });
-  const [editTxnForm, setEditTxnForm] = useState({ id: "", amount: "", date: "", sender: "", receiver: "", location: "", notes: "" });
+  const [txnForm, setTxnForm] = useState(blankTxnForm);
+  const [editTxnForm, setEditTxnForm] = useState({ id: "", amount: "", date: "", originalDate: "", sender: "", receiver: "", location: "", notes: "" });
   const [voidTransactionId, setVoidTransactionId] = useState("");
   const [voidReason, setVoidReason] = useState("");
   const [mergeForm, setMergeForm] = useState({ sourceId: "", targetId: "", name: "" });
-  const [recurringForm, setRecurringForm] = useState({ type: "", amount: "", frequency: "monthly", description: "", nextRun: new Date().toISOString().slice(0, 10) });
+  const [recurringForm, setRecurringForm] = useState(blankRecurringForm);
   const [exportForm, setExportForm] = useState({ dateFrom: "", dateTo: "", orgName: "" });
   const [selectedReceipt, setSelectedReceipt] = useState(null);
 
@@ -117,6 +122,16 @@ export default function FundVaultApp() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
   };
 
+  const closeAllModals = () => setModals(prev => Object.fromEntries(Object.keys(prev).map(key => [key, false])));
+
+  // Leaving a fund view always drops its loaded transactions the same way,
+  // whether that's a shortcut, "Back to databases", or a nav tab switch.
+  const goToTab = tab => {
+    setCurrentDbId(null);
+    setTransactions([]);
+    setActiveTab(tab);
+  };
+
   const resetSession = () => {
     setToken("");
     setCurrentUser(null);
@@ -130,6 +145,7 @@ export default function FundVaultApp() {
     setManagedUsers([]);
     setOverview(null);
     setActiveTab("home");
+    closeAllModals();
     localStorage.removeItem("fundvault_token");
     localStorage.removeItem("fundvault_currentUser");
     localStorage.removeItem("fundvault_org");
@@ -332,6 +348,12 @@ export default function FundVaultApp() {
         if (err.status === 401) throw err;
         // Viewers may not post, and a failed run is retried next login.
       }
+      // currentUser is restored from localStorage on refresh and can go
+      // stale (e.g. a role change made elsewhere); /auth/me is the source of
+      // truth for every can() gate, so refresh it before the rest loads.
+      const freshUser = await authedRequest("/auth/me");
+      setCurrentUser(prev => ({ ...freshUser, token: prev?.token || token }));
+      localStorage.setItem("fundvault_currentUser", JSON.stringify(freshUser));
       await refreshAfter("fund");
     } catch (err) {
       // A 401 has already signed the user out; anything else is worth saying.
@@ -380,7 +402,7 @@ export default function FundVaultApp() {
         })
       });
       setModals(prev => ({ ...prev, createDb: false }));
-      setCreateDbForm({ name: "", description: "", lowBalanceThreshold: "", approvalThreshold: "" });
+      setCreateDbForm(blankCreateDbForm());
       toast(`Database "${created.name}" created successfully`, "success");
       await refreshAfter("fund");
       await loadCurrentDb(created.id);
@@ -407,8 +429,9 @@ export default function FundVaultApp() {
       });
       setModals(prev => ({ ...prev, editDb: false }));
       toast("Database updated", "success");
+      // refreshAfter("fund") already re-fetches this fund; editing never
+      // touches its transactions, so there's nothing loadCurrentDb would add.
       await refreshAfter("fund");
-      if (activeTab === "db") await loadCurrentDb(currentDbId);
     } catch (err) {
       toast(err.message, "error");
     }
@@ -437,7 +460,9 @@ export default function FundVaultApp() {
     try {
       const response = await authedRequest(`/databases/${currentDbId}/archive`, { method: "POST" });
       toast(response.is_archived ? "Database archived" : "Database unarchived", "success");
-      await Promise.all([refreshAfter("fund"), loadCurrentDb(currentDbId)]);
+      // refreshAfter("fund") already re-fetches this fund; archiving never
+      // touches its transactions, so there's nothing loadCurrentDb would add.
+      await refreshAfter("fund");
     } catch (err) {
       toast(err.message, "error");
     }
@@ -491,18 +516,8 @@ export default function FundVaultApp() {
         })
       });
       setModals(prev => ({ ...prev, txn: false }));
-      setTxnForm({
-        type: "",
-        amount: "",
-        date: nowInput(),
-        sender: "",
-        receiver: "",
-        mode: "electronic",
-        modeData: { elecId: "" },
-        location: "",
-        notes: "",
-        receiptImage: null
-      });
+      // openNewTransactionModal always rebuilds txnForm from scratch when the
+      // modal is reopened, so there's nothing to reset here while it's closed.
       toast(
         response.requiresApproval
           ? `Transaction pending approval${currentDb?.approval_threshold ? ` (above ${fmt(currentDb.approval_threshold)} threshold)` : ""}`
@@ -529,17 +544,26 @@ export default function FundVaultApp() {
       toast("Enter a valid amount", "error");
       return;
     }
-    const parsedDate = new Date(editTxnForm.date);
-    if (Number.isNaN(parsedDate.getTime())) {
-      toast("Please provide a valid transaction date", "error");
-      return;
+    // Only send `date` when the user actually touched the field: the input
+    // holds local wall-clock time, so re-sending the unchanged value would
+    // round-trip it through toISOString() and re-store it under a different
+    // offset every time the transaction is edited for any other reason.
+    const dateChanged = editTxnForm.date !== editTxnForm.originalDate;
+    let isoDate;
+    if (dateChanged) {
+      const parsedDate = new Date(editTxnForm.date);
+      if (Number.isNaN(parsedDate.getTime())) {
+        toast("Please provide a valid transaction date", "error");
+        return;
+      }
+      isoDate = parsedDate.toISOString();
     }
     try {
       await authedRequest(`/transactions/${editTxnForm.id}`, {
         method: "PUT",
         body: JSON.stringify({
           amount,
-          date: parsedDate.toISOString(),
+          ...(dateChanged ? { date: isoDate } : {}),
           sender: editTxnForm.sender.trim(),
           receiver: editTxnForm.receiver.trim(),
           location: editTxnForm.location.trim(),
@@ -623,7 +647,7 @@ export default function FundVaultApp() {
         })
       });
       toast("Recurring transaction added", "success");
-      setRecurringForm({ type: "", amount: "", frequency: "monthly", description: "", nextRun: new Date().toISOString().slice(0, 10) });
+      setRecurringForm(blankRecurringForm());
       await loadRecurring(currentDbId);
       await refreshAudit();
     } catch (err) {
@@ -799,26 +823,17 @@ export default function FundVaultApp() {
 
   const openNewTransactionModal = () => {
     const isFirstTransaction = transactions.filter(txn => !txn.is_voided).length === 0;
-    setTxnForm({
-      type: isFirstTransaction ? "credit" : "",
-      amount: "",
-      date: nowInput(),
-      sender: "",
-      receiver: "",
-      mode: "electronic",
-      modeData: { elecId: "" },
-      location: "",
-      notes: "",
-      receiptImage: null
-    });
+    setTxnForm({ ...blankTxnForm(), type: isFirstTransaction ? "credit" : "" });
     setModals(prev => ({ ...prev, txn: true }));
   };
 
   const openEditTransactionModal = txn => {
+    const date = txn.date ? toLocalInput(txn.date) : "";
     setEditTxnForm({
       id: txn.id,
       amount: txn.amount,
-      date: (txn.date || "").slice(0, 16),
+      date,
+      originalDate: date,
       sender: txn.sender || "",
       receiver: txn.receiver || "",
       location: txn.location || "",
@@ -836,7 +851,7 @@ export default function FundVaultApp() {
   const openRecurringModal = async () => {
     if (!currentDbId) return;
     await loadRecurring(currentDbId);
-    setRecurringForm({ type: "", amount: "", frequency: "monthly", description: "", nextRun: new Date().toISOString().slice(0, 10) });
+    setRecurringForm(blankRecurringForm());
     setModals(prev => ({ ...prev, recurring: true }));
   };
 
@@ -846,8 +861,8 @@ export default function FundVaultApp() {
     let to = "";
     if (txns.length) {
       const sorted = [...txns].sort((a, b) => new Date(a.date) - new Date(b.date));
-      from = sorted[0]?.date?.split("T")[0] || "";
-      to = sorted[sorted.length - 1]?.date?.split("T")[0] || "";
+      from = sorted[0]?.date ? toLocalInput(sorted[0].date).slice(0, 10) : "";
+      to = sorted[sorted.length - 1]?.date ? toLocalInput(sorted[sorted.length - 1].date).slice(0, 10) : "";
     }
     setExportForm({ dateFrom: from, dateTo: to, orgName: "" });
     setModals(prev => ({ ...prev, export: true }));
@@ -896,7 +911,7 @@ export default function FundVaultApp() {
     printWindow.print();
   };
 
-  const clearCache = () => {
+  const clearCache = async () => {
     if (
       !window.confirm(
         "⚠️ WARNING: Clear Cache\n\nThis will permanently delete all cached data and local preferences.\n\nContinue?"
@@ -904,9 +919,11 @@ export default function FundVaultApp() {
     ) {
       return;
     }
-    localStorage.removeItem("fundvault_token");
-    localStorage.removeItem("fundvault_currentUser");
     localStorage.removeItem("fundvault_theme");
+    // logout() revokes the server session and clears the remaining session
+    // keys (token, currentUser, org) -- clearing them here too would leave
+    // the server session alive after a "cleared" cache.
+    await logout();
     toast("✅ Cache cleared successfully. Refreshing app...", "success");
     setTimeout(() => window.location.reload(), 800);
   };
@@ -935,26 +952,34 @@ export default function FundVaultApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
+  // No deps array: this reads modals/currentDbId/currentDb/transactions/
+  // currentUser/activeTab freshly on every render rather than risk a stale
+  // closure over a partial deps list (e.g. a stale `transactions` breaking
+  // openNewTransactionModal's first-transaction check).
   useEffect(() => {
     const onKeyDown = e => {
-      if (["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
+      if (!token || e.ctrlKey || e.metaKey || e.altKey) return;
       const anyModalOpen = Object.values(modals).some(Boolean);
-      if (e.key === "Escape" && anyModalOpen) {
-        setModals(prev => Object.fromEntries(Object.keys(prev).map(key => [key, false])));
+      // Escape must close modals even while focus is inside a form field, so
+      // it's handled before the INPUT/TEXTAREA/SELECT early return below.
+      if (e.key === "Escape") {
+        if (anyModalOpen) closeAllModals();
         return;
       }
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
       if (anyModalOpen) return;
       switch (e.key.toLowerCase()) {
         case "n":
-          if (currentDbId) openNewTransactionModal();
+          if (activeTab === "db" && currentDb && !currentDb.is_archived && can(currentUser, ACTIONS.CREATE_TXN)) {
+            openNewTransactionModal();
+          }
           break;
         case "d":
-          setModals(prev => ({ ...prev, createDb: true }));
+          if (can(currentUser, ACTIONS.MANAGE_FUNDS)) setModals(prev => ({ ...prev, createDb: true }));
           break;
         case "h":
-          setCurrentDbId(null);
-          setTransactions([]);
-          setActiveTab("home");
+        case "1":
+          goToTab("home");
           break;
         case "t":
           setTheme(prev => (prev === "light" ? "dark" : "light"));
@@ -962,25 +987,14 @@ export default function FundVaultApp() {
         case "?":
           setModals(prev => ({ ...prev, shortcuts: true }));
           break;
-        case "1":
-          setCurrentDbId(null);
-          setTransactions([]);
-          setActiveTab("home");
-          break;
         case "2":
-          setCurrentDbId(null);
-          setTransactions([]);
-          setActiveTab("dashboard");
+          goToTab("dashboard");
           break;
         case "3":
-          setCurrentDbId(null);
-          setTransactions([]);
-          setActiveTab("audit");
+          goToTab("audit");
           break;
         case "4":
-          setCurrentDbId(null);
-          setTransactions([]);
-          setActiveTab("trash");
+          goToTab("trash");
           break;
         default:
           break;
@@ -988,7 +1002,7 @@ export default function FundVaultApp() {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [modals, currentDbId]);
+  });
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -1028,16 +1042,13 @@ export default function FundVaultApp() {
         onOpenOrgSettings={() => setModals(prev => ({ ...prev, orgSettings: true }))}
         onOpenJoinCodes={() => setModals(prev => ({ ...prev, joinCodes: true }))}
         onClearCache={clearCache}
-        userDropdownOpen={userDropdownOpen}
-        setUserDropdownOpen={setUserDropdownOpen}
       />
 
-      {activeTab !== "db" && <NavTabs activeTab={activeTab} onSwitch={tab => setActiveTab(tab)} />}
+      {activeTab !== "db" && <NavTabs activeTab={activeTab} onSwitch={goToTab} />}
 
       {activeTab === "home" && (
         <HomeView
           databases={databases}
-          auditLogs={auditLogs}
           loading={loading}
           onOpenDb={loadCurrentDb}
           onOpenCreateDb={() => setModals(prev => ({ ...prev, createDb: true }))}
@@ -1049,18 +1060,22 @@ export default function FundVaultApp() {
       )}
       {activeTab === "dashboard" && <DashboardView databases={databases} overview={overview} theme={theme} />}
       {activeTab === "audit" && <AuditView auditLogs={auditLogs} filters={auditFilters} setFilters={setAuditFilters} />}
-      {activeTab === "trash" && <TrashView items={trashItems} onRestore={restoreTrashItem} onPermanentDelete={permanentDeleteTrashItem} onEmptyTrash={emptyTrash} />}
+      {activeTab === "trash" && (
+        <TrashView
+          items={trashItems}
+          onRestore={restoreTrashItem}
+          onPermanentDelete={permanentDeleteTrashItem}
+          onEmptyTrash={emptyTrash}
+          canManageFunds={can(currentUser, ACTIONS.MANAGE_FUNDS)}
+        />
+      )}
       {activeTab === "db" && (
         <DatabaseView
           database={currentDb}
           transactions={transactions}
           filters={txnFilters}
           setFilters={setTxnFilters}
-          onGoHome={() => {
-            setCurrentDbId(null);
-            setTransactions([]);
-            setActiveTab("home");
-          }}
+          onGoHome={() => goToTab("home")}
           onOpenEditDb={() => openEditDbModal()}
           onArchiveDb={archiveDatabase}
           onOpenRecurring={openRecurringModal}

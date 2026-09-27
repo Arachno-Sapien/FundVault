@@ -16,7 +16,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 # ---------------------------------------------------------------------------
 # Shared prompt
@@ -52,12 +52,17 @@ def _one(entry):
     provider = entry.get("provider")
     model = entry.get("model")
     api_key = entry.get("api_key")
-    if not model or not api_key:
+    # api_key must be a str: it later reaches str.replace() in _redact, and a
+    # non-str value (e.g. a stray 123) would crash that instead of just
+    # being treated as absent.
+    if not model or not isinstance(api_key, str) or not api_key:
         return None
     if provider == "openai_compatible":
-        if not entry.get("base_url"):
+        base_url = entry.get("base_url")
+        # Same reasoning: base_url reaches urlparse() in blocked_https_url_message.
+        if not isinstance(base_url, str) or not base_url:
             return None
-        return AIConfig("openai_compatible", model, api_key, entry["base_url"])
+        return AIConfig("openai_compatible", model, api_key, base_url)
     if provider == "gemini":
         return AIConfig("gemini", model, api_key)
     return None
@@ -90,7 +95,15 @@ def _redact(message, config):
 def _compress_image(image_bytes: bytes) -> bytes:
     """Resize to max 1024 px, convert to JPEG 75 % — reduces payload ~95 %."""
     img = Image.open(io.BytesIO(image_bytes))
-    if img.mode in ("RGBA", "P", "LA"):
+    # Decompression-bomb guard, before any convert/load. draft() is a no-op
+    # for non-JPEG formats but hints the JPEG decoder to downscale while
+    # decoding, so a huge JPEG never fully decodes at its original size in
+    # the first place; the size check below catches the rest (PNG, etc.).
+    img.draft("RGB", (2048, 2048))
+    if img.width * img.height > 25_000_000:
+        raise ValueError("Image is too large")
+    img = ImageOps.exif_transpose(img)  # honour EXIF orientation before resizing
+    if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     if max(img.size) > 1024:
         img.thumbnail((1024, 1024), Image.LANCZOS)
@@ -166,11 +179,26 @@ def _parse_json_from_text(text: str) -> dict:
 # Provider: any OpenAI-compatible endpoint (NVIDIA NIM, etc.)
 # ---------------------------------------------------------------------------
 
-def _extract_openai_compatible(compressed: bytes, config: AIConfig) -> dict:
-    from openai import OpenAI
+def _openai_client(config: AIConfig):
+    from openai import DefaultHttpxClient, OpenAI
 
+    # gunicorn kills a worker at 60s (render.yaml); the SDK default
+    # (read=600s, 2 retries) would never let the fallback provider run, so
+    # this must fail fast well inside that budget. Redirects stay off: the
+    # SSRF check vets base_url's host only, and the SDK's default client would
+    # follow a 3xx from that host to an internal address.
+    return OpenAI(
+        base_url=config.base_url,
+        api_key=config.api_key,
+        timeout=25.0,
+        max_retries=0,
+        http_client=DefaultHttpxClient(follow_redirects=False),
+    )
+
+
+def _extract_openai_compatible(compressed: bytes, config: AIConfig) -> dict:
     b64 = base64.b64encode(compressed).decode("utf-8")
-    client = OpenAI(base_url=config.base_url, api_key=config.api_key)
+    client = _openai_client(config)
 
     response = client.chat.completions.create(
         model=config.model,
@@ -208,7 +236,11 @@ def _extract_gemini(compressed: bytes, config: AIConfig) -> dict:
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=config.api_key)
+    # Same fail-fast reasoning as the OpenAI client above; google-genai has no
+    # timeout at all by default. HttpOptions.timeout is in milliseconds.
+    client = genai.Client(
+        api_key=config.api_key, http_options=types.HttpOptions(timeout=25_000)
+    )
     response = client.models.generate_content(
         model=config.model,
         contents=[
@@ -220,7 +252,7 @@ def _extract_gemini(compressed: bytes, config: AIConfig) -> dict:
             )
         ],
     )
-    result = _parse_json_from_text(response.text.strip())
+    result = _parse_json_from_text(response.text)
     result["_provider"] = config.model
     return result
 
@@ -235,7 +267,7 @@ def _run(config, compressed):
     return _extract_openai_compatible(compressed, config)
 
 
-def extract_from_receipt_image(image_bytes, mime_type, config):
+def extract_from_receipt_image(image_bytes, config):
     """Extract payment details using the org's own providers.
 
     `config` is the dict returned by parse_ai_config. The primary is tried
@@ -293,12 +325,13 @@ def check_ai_config(config):
     try:
         if target.provider == "gemini":
             from google import genai
+            from google.genai import types
 
-            genai.Client(api_key=target.api_key).models.list()
+            genai.Client(
+                api_key=target.api_key, http_options=types.HttpOptions(timeout=25_000)
+            ).models.list()
         else:
-            from openai import OpenAI
-
-            OpenAI(base_url=target.base_url, api_key=target.api_key).models.list()
+            _openai_client(target).models.list()
         return True, f"{target.model} is reachable."
     except Exception as exc:
         return False, _redact(str(exc), target)

@@ -54,7 +54,7 @@ export default function DatabaseView({
     if (search && !searchable.includes(search)) return false;
     if (filters.type && txn.type !== filters.type) return false;
     if (filters.mode && txn.mode !== filters.mode) return false;
-    if (filters.dateFrom && new Date(txn.date) < new Date(filters.dateFrom)) return false;
+    if (filters.dateFrom && new Date(txn.date) < new Date(`${filters.dateFrom}T00:00:00`)) return false;
     if (filters.dateTo && new Date(txn.date) > new Date(`${filters.dateTo}T23:59:59`)) return false;
     const amountMin = Number(filters.amountMin || 0);
     const amountMax = filters.amountMax ? Number(filters.amountMax) : Number.POSITIVE_INFINITY;

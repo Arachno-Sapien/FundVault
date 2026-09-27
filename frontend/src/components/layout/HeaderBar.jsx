@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { ACTIONS, can } from "lib/permissions";
 
 export default function HeaderBar({
@@ -10,10 +12,9 @@ export default function HeaderBar({
   onOpenProfile,
   onOpenOrgSettings,
   onOpenJoinCodes,
-  onClearCache,
-  userDropdownOpen,
-  setUserDropdownOpen
+  onClearCache
 }) {
+  const [userDropdownOpen, setUserDropdownOpen] = useState(false);
   const avatar = (currentUser?.username || "G")[0]?.toUpperCase();
   const role = currentUser?.role || "";
   const canManageUsers = can(currentUser, ACTIONS.MANAGE_MEMBERS);
@@ -34,7 +35,13 @@ export default function HeaderBar({
           <span className="role-chip">{currentUser?.role}</span>
         </div>
         <div className="user-menu-wrap">
-          <div className="user-menu" onClick={() => setUserDropdownOpen(prev => !prev)}>
+          <button
+            type="button"
+            className="user-menu"
+            aria-haspopup="true"
+            aria-expanded={userDropdownOpen}
+            onClick={() => setUserDropdownOpen(prev => !prev)}
+          >
             <div className="user-avatar">
               {currentUser?.profile_image ? (
                 <img src={currentUser.profile_image} alt="Profile" />
@@ -46,7 +53,7 @@ export default function HeaderBar({
               <div className="user-name">{currentUser?.username || "Guest"}</div>
               <div className="user-role">{role.charAt(0).toUpperCase() + role.slice(1)}</div>
             </div>
-          </div>
+          </button>
 
           {userDropdownOpen && (
             <div className="user-dropdown">

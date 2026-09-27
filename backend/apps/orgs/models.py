@@ -1,5 +1,4 @@
 import secrets
-from datetime import timedelta
 
 from django.db import models
 from django.utils import timezone
@@ -46,13 +45,6 @@ class JoinCode(models.Model):
     class Meta:
         db_table = "join_codes"
 
-    def is_usable(self):
-        if self.revoked:
-            return False
-        if self.expires_at <= timezone.now():
-            return False
-        return self.uses < self.max_uses
-
     def consume(self):
         """Atomically claim one use. Returns True if claimed."""
         claimed = (
@@ -65,10 +57,6 @@ class JoinCode(models.Model):
         if claimed:
             self.uses += 1
         return bool(claimed)
-
-    @staticmethod
-    def default_expiry():
-        return timezone.now() + timedelta(days=14)
 
 
 class EmailIndex(models.Model):

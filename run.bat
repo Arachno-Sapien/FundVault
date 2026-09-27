@@ -8,10 +8,12 @@ echo.
 cd /d "%~dp0"
 
 echo Starting development databases...
-docker compose up -d >nul 2>nul
+docker compose up -d --wait >nul 2>nul
 if %ERRORLEVEL% neq 0 (
     echo WARNING: could not start Docker databases.
-    echo Set DATABASE_URL and DEV_TENANT_DATABASE_URL in backend\.env to use your own Postgres.
+    echo This project expects Postgres on 127.0.0.1:5433 ^(control plane^) and
+    echo 127.0.0.1:5434 ^(dev tenant^) -- start Docker Desktop and re-run, or
+    echo point DATABASE_URL in backend\.env at your own control-plane Postgres.
     echo.
 )
 

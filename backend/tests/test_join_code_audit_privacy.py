@@ -16,8 +16,9 @@ class JoinCodeAuditPrivacyTests(OrgTestMixin, TestCase):
     role gate — any authenticated member, including Viewer, can read it. If
     a join code (or even a length-based mask of one) ever lands in an audit
     entry's entity_id, a Viewer could read an Admin-granting code straight
-    out of GET /api/audit and redeem it via the unauthenticated, unthrottled
-    /api/orgs/join/preview and /api/orgs/join to self-escalate.
+    out of GET /api/audit and redeem it via the unauthenticated (but
+    rate-limited per IP) /api/orgs/join/preview and /api/orgs/join to
+    self-escalate.
     """
 
     def setUp(self):
@@ -39,6 +40,7 @@ class JoinCodeAuditPrivacyTests(OrgTestMixin, TestCase):
     def _audit_trail_text(self):
         with org_context(ORG_ALIAS):
             entries = AuditLog.objects.filter(entity_type="join_code")
+            self.assertTrue(entries.exists(), "expected a join_code audit row")
             return " ".join(f"{e.entity_id} {e.details}" for e in entries)
 
     def test_minted_code_is_not_recoverable_from_the_audit_trail(self):
@@ -54,10 +56,11 @@ class JoinCodeAuditPrivacyTests(OrgTestMixin, TestCase):
 
     def test_revoked_code_is_not_recoverable_from_the_audit_trail(self):
         code = json.loads(self._mint("member").content)["code"]
-        self.client.delete(
+        response = self.client.delete(
             f"/api/orgs/codes/{code}",
             HTTP_AUTHORIZATION=f"Bearer {self.owner_token}",
         )
+        self.assertEqual(response.status_code, 200)
         trail = self._audit_trail_text()
         self.assertNotIn(code, trail)
         left, right = code.split("-")[1], code.split("-")[2]

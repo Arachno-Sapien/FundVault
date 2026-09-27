@@ -2,6 +2,7 @@ from functools import wraps
 from datetime import timedelta
 from uuid import uuid4
 
+import bcrypt
 import jwt
 from django.conf import settings
 from django.utils import timezone
@@ -9,6 +10,17 @@ from django.utils import timezone
 from apps.accounts.models import Session
 from apps.common.utils import json_error
 from apps.common.utils import uid
+
+
+def hash_password(raw_password):
+    return bcrypt.hashpw(raw_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def check_password(raw_password, hashed):
+    try:
+        return bcrypt.checkpw(raw_password.encode("utf-8"), hashed.encode("utf-8"))
+    except ValueError:
+        return False
 
 
 def _clean_expired_sessions():

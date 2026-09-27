@@ -13,7 +13,11 @@ from apps.orgs.models import Org
 from tests.support import ORG_ALIAS, OrgTestMixin, TENANT_URL
 
 
-class LedgerPermissionTests(OrgTestMixin, TestCase):
+class LedgerPermissionFixture(OrgTestMixin, TestCase):
+    """Shared setUp/helpers for the permission tests below. No test_* methods
+    of its own, so subclassing it (instead of a sibling test class) doesn't
+    re-run any tests twice."""
+
     def setUp(self):
         self.client = Client()
         Org.objects.create(
@@ -53,6 +57,8 @@ class LedgerPermissionTests(OrgTestMixin, TestCase):
             **self._auth(role),
         )
 
+
+class LedgerPermissionTests(LedgerPermissionFixture):
     def test_viewer_can_read_funds(self):
         self.assertEqual(self.client.get("/api/databases", **self._auth("viewer")).status_code, 200)
 
@@ -109,7 +115,7 @@ class LedgerPermissionTests(OrgTestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
 
 
-class ApprovalRuleIntegrationTests(LedgerPermissionTests):
+class ApprovalRuleIntegrationTests(LedgerPermissionFixture):
     def test_member_transaction_over_threshold_awaits_approval(self):
         response = self._post_txn("member", amount=600.0)
         self.assertEqual(response.status_code, 200)
@@ -133,7 +139,7 @@ class ApprovalRuleIntegrationTests(LedgerPermissionTests):
         self.assertEqual(response.status_code, 403)
 
 
-class RecurringApprovalRuleTests(LedgerPermissionTests):
+class RecurringApprovalRuleTests(LedgerPermissionFixture):
     """process_due_recurring must apply the same role-aware approval rule as
     database_transactions, not always auto-post. A recurring rule's creator
     can be demoted (owner-only Action.CHANGE_ROLE) after the rule was set up,
@@ -616,7 +622,7 @@ class AuditAndTrashOrgScopingTests(OrgTestMixin, TestCase):
             owner_email="o@example.com", db_connection=TENANT_URL,
         )
         self.tokens = {
-            role: self.make_user(f"u_{role}", role) for role in ("owner", "member")
+            role: self.make_user(f"u_{role}", role) for role in ("owner", "admin", "member")
         }
 
     def _auth(self, role):
@@ -690,7 +696,7 @@ class AuditAndTrashOrgScopingTests(OrgTestMixin, TestCase):
                 entity_data=json.dumps({"id": "f_cross"}), deleted_by_id="u_member",
             )
 
-        response = self.client.post("/api/trash/tr_cross/restore", **self._auth("owner"))
+        response = self.client.post("/api/trash/tr_cross/restore", **self._auth("admin"))
         self.assertEqual(response.status_code, 200)
         with org_context(ORG_ALIAS):
             self.assertFalse(TrashItem.objects.filter(id="tr_cross").exists())
@@ -707,7 +713,7 @@ class AuditAndTrashOrgScopingTests(OrgTestMixin, TestCase):
                 entity_data=json.dumps({"id": "f_cross2"}), deleted_by_id="u_member",
             )
 
-        response = self.client.delete("/api/trash/tr_cross2", **self._auth("owner"))
+        response = self.client.delete("/api/trash/tr_cross2", **self._auth("admin"))
         self.assertEqual(response.status_code, 200)
         with org_context(ORG_ALIAS):
             self.assertFalse(TrashItem.objects.filter(id="tr_cross2").exists())

@@ -31,6 +31,8 @@ export default function OrgSettingsModal({ open, onClose, request, toast }) {
       toast(`${SECTION_LABEL[section] || "Storage"} saved and verified`, "success");
       setCurrent(await request("/orgs/settings"));
       if (section === "database") setDatabaseUrl("");
+      if (section === "storage") setStorage(BLANK_STORAGE);
+      if (section === "ai") setAi(BLANK_AI);
     } catch (err) {
       toast(err.message, "error");
     } finally {
@@ -120,11 +122,17 @@ export default function OrgSettingsModal({ open, onClose, request, toast }) {
       <div className="section-label" style={{ marginBottom: 8 }}>
         Receipt extraction
       </div>
-      {current?.ai?.primary ? (
+      {current?.ai?.primary && (
         <p className="hint">
           Primary: {current.ai.primary.model} (key {current.ai.primary.api_key})
         </p>
-      ) : (
+      )}
+      {current?.ai?.fallback && (
+        <p className="hint">
+          Fallback: {current.ai.fallback.model} (key {current.ai.fallback.api_key})
+        </p>
+      )}
+      {!current?.ai?.primary && !current?.ai?.fallback && (
         <p className="hint">Not configured — receipt extraction is disabled.</p>
       )}
       <div className="form-group">

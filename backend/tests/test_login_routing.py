@@ -84,6 +84,7 @@ class LoginTests(OrgTestMixin, TestCase):
         # dict for the whole test run — without this, the burst test below would
         # leave every later login in this process refused with a 429.
         cache.clear()
+        self.addCleanup(cache.clear)
         self.client = Client()
         self.org = Org.objects.create(
             id="o1", name="Acme", slug="acme",
@@ -122,6 +123,21 @@ class LoginTests(OrgTestMixin, TestCase):
 
     def test_wrong_password_is_refused(self):
         self.assertEqual(self._login(password="wrong").status_code, 401)
+
+    def test_a_username_matching_someone_elses_email_does_not_shadow_their_login(self):
+        # A member can set their own username to anything, including another
+        # member's email address. Before this fix, the username match was
+        # tried first and won unconditionally -- locking alice out of logging
+        # in with her own email once someone else's username equalled it.
+        with org_context(ORG_ALIAS):
+            User.objects.create(
+                id="u2", username="alice@example.com", email="shadow@example.com",
+                password_hash=bcrypt.hashpw(b"malpass", bcrypt.gensalt()).decode("utf-8"),
+                role=User.Role.MEMBER, is_active=True,
+            )
+        response = self._login(username="alice@example.com")  # alice's real email + real password
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(json.loads(response.content)["user"]["id"], "u1")
 
     def test_non_object_login_body_is_a_normal_400_not_a_500(self):
         # The middleware parses orgId out of the body itself, before
@@ -203,3 +219,31 @@ class LoginTests(OrgTestMixin, TestCase):
             response = self.client.get("/api/auth/me", HTTP_AUTHORIZATION=f"Bearer {token}")
         self.assertEqual(response.status_code, 200)
         self.assertEqual([q["sql"].split()[0] for q in tenant.captured_queries], ["SELECT"])
+
+    def test_logout_then_me_is_401(self):
+        response = self._login()
+        token = json.loads(response.content)["token"]
+        self.assertEqual(
+            self.client.post("/api/auth/logout", HTTP_AUTHORIZATION=f"Bearer {token}").status_code, 200
+        )
+        self.assertEqual(
+            self.client.get("/api/auth/me", HTTP_AUTHORIZATION=f"Bearer {token}").status_code, 401
+        )
+
+    def test_login_with_the_right_password_but_an_inactive_account_is_403(self):
+        with org_context(ORG_ALIAS):
+            User.objects.create(
+                id="u_inactive", username="bob", email="bob@example.com",
+                password_hash=bcrypt.hashpw(b"hunter22", bcrypt.gensalt()).decode("utf-8"),
+                role=User.Role.MEMBER, is_active=False,
+            )
+        self.assertEqual(self._login(username="bob", password="hunter22").status_code, 403)
+
+
+class HealthCheckTests(TestCase):
+    databases = {"default"}
+
+    def test_health_check_needs_no_token(self):
+        response = Client().get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {"status": "ok"})

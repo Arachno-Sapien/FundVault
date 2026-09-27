@@ -50,6 +50,15 @@ class ProductionSettingsTests(SimpleTestCase):
             with self.assertRaises(ImproperlyConfigured):
                 _load()
 
+    def test_the_env_example_jwt_secret_is_refused(self):
+        # backend/.env.example ships JWT_SECRET=fundvault-jwt-secret-change-in-production,
+        # which install.bat copies straight into backend/.env -- a production
+        # boot with that untouched file must not accept it.
+        env = dict(REQUIRED, JWT_SECRET="fundvault-jwt-secret-change-in-production")
+        with mock.patch.dict(os.environ, env, clear=False):
+            with self.assertRaises(ImproperlyConfigured):
+                _load()
+
     def test_security_headers_are_on(self):
         with mock.patch.dict(os.environ, REQUIRED, clear=False):
             settings = _load()
@@ -108,18 +117,15 @@ class ProductionSettingsTests(SimpleTestCase):
             with self.assertRaisesMessage(ImproperlyConfigured, "not a valid Fernet key"):
                 _load()
 
-    def test_production_runs_the_base_middleware_plus_whitenoise(self):
+    def test_production_runs_exactly_the_base_middleware(self):
+        # No installed app ships static files, there is no admin, and the
+        # frontend is on Vercel -- nothing needs whitenoise/staticfiles, so
+        # production adds nothing to the base middleware stack.
         from fundvault_backend import settings as base
 
-        whitenoise = "whitenoise.middleware.WhiteNoiseMiddleware"
         with mock.patch.dict(os.environ, REQUIRED, clear=True):
             production = _load().MIDDLEWARE
-        # The tests run the base stack: production may only add WhiteNoise to it.
-        self.assertEqual([m for m in production if m != whitenoise], base.MIDDLEWARE)
-        self.assertEqual(
-            production[production.index("corsheaders.middleware.CorsMiddleware") + 1], whitenoise
-        )
-        self.assertNotIn(whitenoise, base.MIDDLEWARE)
+        self.assertEqual(production, base.MIDDLEWARE)
 
     def test_x_frame_options_header_is_actually_sent(self):
         with mock.patch.dict(os.environ, REQUIRED, clear=True):

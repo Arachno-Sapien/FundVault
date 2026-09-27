@@ -3,7 +3,6 @@
 import json
 from datetime import timedelta
 
-from django.db import connections
 from django.test import Client, TestCase, TransactionTestCase
 from django.utils import timezone
 
@@ -29,14 +28,14 @@ TENANT_URL = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_d
 TENANT_URL_B = "postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev_orgb"
 
 # Django computes its per-test database allowlist once, from whatever aliases
-# already exist, before any test's setUp runs (same reasoning as
-# test_org_middleware.py's ORG_ALIAS) — so these must be real, registered
-# aliases by then, not just names in `databases`.
+# already exist, before any test's setUp runs (same reasoning as ORG_ALIAS in
+# tests/support.py) — so these must be real, registered aliases by then, not
+# just names in `databases`.
 ORG_A_ALIAS = alias_for_org("orga")
 ORG_B_ALIAS = alias_for_org("orgb")
 
 
-def _register_tenant_alias(org_id, url, base_alias):
+def _register_tenant_alias(org_id, url):
     """Register (or re-register) a dynamic tenant alias for this test run.
 
     ensure_connection() builds a fresh config straight from the raw URL when
@@ -44,21 +43,17 @@ def _register_tenant_alias(org_id, url, base_alias):
     unrelated test evicts it from the shared connection registry first (see
     the registry cap test in test_org_connections.py) — the LRU cap test
     floods the same module-level registry these aliases live in, and its
-    eviction pops the alias's dict entry out entirely. A freshly built config
-    carries the connection string's real database name, not the "test_"
-    prefixed database Django's test runner swapped `base_alias` to at suite
-    startup (that one-time swap only reaches aliases that already existed
-    then). Re-pointing NAME at whatever `base_alias` currently resolves to
-    keeps this alias on the same physical test database no matter what
-    happened to the registry in between.
+    eviction pops the alias's dict entry out entirely. fundvault_backend's
+    IsolatedDatabaseRunner patches build_config for the whole test run to
+    redirect the URL's real database name to its "test_" copy, so a plain
+    ensure_connection() call always lands on the same physical test database
+    no matter how many times the registry gets flushed in between.
     """
-    alias = ensure_connection(Org(id=org_id, db_connection=url))
-    connections.databases[alias]["NAME"] = connections[base_alias].settings_dict["NAME"]
-    return alias
+    return ensure_connection(Org(id=org_id, db_connection=url))
 
 
-_register_tenant_alias("orga", TENANT_URL, "tenant_dev")
-_register_tenant_alias("orgb", TENANT_URL_B, "tenant_dev_b")
+_register_tenant_alias("orga", TENANT_URL)
+_register_tenant_alias("orgb", TENANT_URL_B)
 
 
 class NoContextTests(TestCase):
@@ -89,12 +84,9 @@ class TwoOrgTests(TransactionTestCase):
         # Re-register immediately before Django validates `databases` against
         # the live registry: an unrelated test's eviction (see the registry
         # cap test in test_org_connections.py) can drop these between module
-        # import and here — and by now setup_databases() has already run, so
-        # a plain ensure_connection() would rebuild the alias pointing at the
-        # real database instead of the "test_" one. _register_tenant_alias
-        # re-syncs each to whatever its base alias actually resolves to.
-        _register_tenant_alias("orga", TENANT_URL, "tenant_dev")
-        _register_tenant_alias("orgb", TENANT_URL_B, "tenant_dev_b")
+        # import and here.
+        _register_tenant_alias("orga", TENANT_URL)
+        _register_tenant_alias("orgb", TENANT_URL_B)
         super().setUpClass()
 
     def setUp(self):

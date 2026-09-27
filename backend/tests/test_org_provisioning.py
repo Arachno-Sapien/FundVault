@@ -1,4 +1,5 @@
 import json
+import socket
 from unittest import mock
 
 from django.core.cache import cache
@@ -10,6 +11,7 @@ from apps.orgs.models import EmailIndex, Org
 from apps.orgs.provisioning import (
     ProvisioningError,
     _friendly,
+    blocked_https_url_message,
     check_connection,
     migrate_org_database,
     provision_org,
@@ -22,7 +24,7 @@ DEAD_URL = "postgres://fundvault:devpassword@127.0.0.1:9/nothing"
 # provision_org() mints its own org id (uid()) and registers a brand-new
 # "org_<id>" alias to run real migrations against — but Django computes a
 # TestCase's per-test database allowlist once, from whatever aliases already
-# exist, before any test's setUp runs (see ORG_ALIAS in test_org_middleware.py
+# exist, before any test's setUp runs (see ORG_ALIAS in tests/support.py
 # and ORG_A_ALIAS/ORG_B_ALIAS in test_tenant_isolation.py for the same
 # constraint). A truly random id can never be pre-registered ahead of time, so
 # the tests that exercise a real, successful provision_org() call mock
@@ -163,6 +165,10 @@ class ProvisionTests(TestCase):
         self.assertEqual(org.name, "Acme Funds")
         self.assertEqual(org.slug, "acme-funds")
         self.assertTrue(Org.objects.filter(id=org.id).exists())
+        # Only migrate is pinned to the validated IP; runtime reconnects
+        # through this alias must re-resolve the host.
+        options = tenant_connections.connections.databases[alias_for_org(org.id)]["OPTIONS"]
+        self.assertNotIn("hostaddr", options)
 
     def test_provision_failure_leaves_no_org_row(self):
         with self.assertRaises(ProvisioningError):
@@ -423,6 +429,29 @@ class IPv6OnlyHostTests(TestCase):
         self.assertIn("IPv4 connection pooler", message)
 
 
+class UnresolvableHostFailsClosedTests(TestCase):
+    """A host that doesn't resolve at all must be refused, not dialled with
+    no hostaddr pin -- that would let the driver re-resolve it independently
+    and connect wherever THAT lookup points, unchecked. This is also how a
+    libpq multi-host string (postgres://u:p@nohost.invalid,127.0.0.1:5555/db
+    -- urlparse folds the comma-joined pair into a single, unresolvable HOST
+    value) used to skip the internal-address check for every host after the
+    first: psycopg accepts a comma-separated `host` and walks it host by host.
+    """
+
+    databases = {"default"}
+
+    @mock.patch("apps.orgs.provisioning.socket.getaddrinfo", side_effect=socket.gaierror)
+    def test_check_connection_fails_closed_on_an_unresolvable_multi_host_string(self, _gai):
+        result = check_connection("postgres://u:p@nohost.invalid,127.0.0.1:5555/db")
+        self.assertFalse(result.ok)
+        self.assertTrue(result.message)
+
+    @mock.patch("apps.orgs.provisioning.socket.getaddrinfo", side_effect=socket.gaierror)
+    def test_blocked_https_url_message_fails_closed_too(self, _gai):
+        self.assertTrue(blocked_https_url_message("https://nohost.invalid/"))
+
+
 class MigrateOrgDatabaseTests(TestCase):
     """apps.orgs.provisioning.migrate_org_database — repointing an existing
     org at a different database (e.g. an operator migrating providers)."""
@@ -454,14 +483,18 @@ class MigrateOrgDatabaseTests(TestCase):
 
     @mock.patch("apps.orgs.provisioning.drop_connection")
     def test_success_saves_the_new_connection_string(self, _mock_drop):
-        # Reuses TENANT_URL as the "new" target -- same stand-in the rest of
-        # this file uses for "some Postgres the caller supplied"; the point
-        # here is the migrate/save mechanics, not that the string differs
-        # byte-for-byte. drop_connection is mocked for the same reason as
+        # A URL that differs from self.org's starting TENANT_URL byte-for-byte
+        # (application_name is an allowlisted, inert libpq param -- see
+        # apps.common.utils._LIBPQ_URL_PARAMS) but still reaches the same test
+        # database: reusing TENANT_URL unchanged as the "new" target would let
+        # this pass even if the save below were silently skipped, since the
+        # column would already hold that value going in. drop_connection is
+        # mocked for the same reason as
         # test_slug_collision_race_is_a_clean_provisioning_error above: this
         # org's alias is one Django's TestCase wraps in its own atomic block,
         # and actually closing it mid-test fights that teardown.
-        result = migrate_org_database(self.org, TENANT_URL)
-        self.assertEqual(result.db_connection, TENANT_URL)
+        new_url = f"{TENANT_URL}?application_name=fundvault-repoint"
+        result = migrate_org_database(self.org, new_url)
+        self.assertEqual(result.db_connection, new_url)
         self.org.refresh_from_db()
-        self.assertEqual(self.org.db_connection, TENANT_URL)
+        self.assertEqual(self.org.db_connection, new_url)

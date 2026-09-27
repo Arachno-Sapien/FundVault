@@ -28,4 +28,9 @@ export const relativeTime = value => {
   return `${days}d ago`;
 };
 
-export const nowInput = () => new Date().toISOString().slice(0, 16);
+// datetime-local inputs hold local wall-clock time; toISOString() is UTC.
+export const toLocalInput = (value = Date.now()) => {
+  const d = new Date(value);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+};
+export const nowInput = () => toLocalInput();

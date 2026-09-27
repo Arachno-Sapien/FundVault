@@ -10,7 +10,6 @@ ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
-    "django.contrib.staticfiles",
     "corsheaders",
     "apps.accounts.apps.AccountsConfig",
     "apps.ledger",
@@ -68,8 +67,11 @@ DEV_TENANT_URL = os.getenv(
 
 DATABASES = {
     "default": _parse_database_url(CONTROL_PLANE_URL),
-    # Phase 2 replaces this fixed alias with dynamically registered tenants.
-    # It exists now so Phase 1 has somewhere to run ledger migrations.
+    # A fixed test-fixture alias, not a real org's tenant: real orgs get their
+    # own dynamically registered "org_<id>" alias (apps.orgs.connections),
+    # never this one. The test suite points its fixtures at this alias
+    # (tests/support.py's ORG_ALIAS) so it has somewhere to run migrations
+    # without provisioning a real org for every test module.
     "tenant_dev": _parse_database_url(DEV_TENANT_URL),
 }
 
@@ -77,9 +79,6 @@ LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
-
-STATIC_URL = "/static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

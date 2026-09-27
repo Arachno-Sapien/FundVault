@@ -12,16 +12,15 @@ import logging
 from datetime import timedelta
 from urllib.parse import urlparse
 
-import bcrypt
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from apps.accounts.models import User
-from apps.accounts.permissions import Action, require
+from apps.accounts.permissions import Action, can, require
 from apps.accounts.serializers import serialize_user
 from apps.common.audit import add_audit
-from apps.common.auth import auth_required, create_session, create_session_token
+from apps.common.auth import auth_required, create_session, create_session_token, hash_password
 from apps.common.ratelimit import rate_limit
 from apps.common.utils import json_error, parse_body, uid
 from apps.orgs.connections import InvalidConnectionString, ensure_connection
@@ -85,7 +84,7 @@ def create_org(request):
                 id=uid(),
                 username=username,
                 email=email,
-                password_hash=bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
+                password_hash=hash_password(password),
                 role=User.Role.OWNER,
                 is_active=True,
                 updated_at=timezone.now(),
@@ -108,12 +107,16 @@ def create_org(request):
     return JsonResponse({"org": serialize_org(org), "token": token, "user": serialize_user(user)})
 
 
-# Which roles each role with MANAGE_MEMBERS may hand out. Owner is absent from
-# every list: ownership transfers explicitly, never through an invite.
-MINTABLE = {
-    User.Role.OWNER: {User.Role.ADMIN, User.Role.MEMBER, User.Role.VIEWER},
-    User.Role.ADMIN: {User.Role.MEMBER, User.Role.VIEWER},
-}
+def _mintable_roles(actor):
+    """Which roles actor's join codes may grant, resolved through the same
+    capability table as every other check (Action.MINT_ADMIN_CODE) rather
+    than a parallel role list. Owner itself is never mintable -- ownership
+    transfers explicitly, never through an invite.
+    """
+    roles = {User.Role.MEMBER, User.Role.VIEWER}
+    if can(actor, Action.MINT_ADMIN_CODE):
+        roles.add(User.Role.ADMIN)
+    return roles
 
 
 def _usable_code_or_error(raw_code):
@@ -193,7 +196,7 @@ def join_org(request):
             id=uid(),
             username=username,
             email=email,
-            password_hash=bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
+            password_hash=hash_password(password),
             role=code.grants_role,
             is_active=True,
             updated_at=timezone.now(),
@@ -218,7 +221,7 @@ def join_codes(request):
         return denied
 
     if request.method == "GET":
-        mintable = MINTABLE.get(actor.role, ())
+        mintable = _mintable_roles(actor)
         rows = JoinCode.objects.filter(org=org, grants_role__in=mintable).order_by("-created_at")
         return JsonResponse(
             [
@@ -237,7 +240,7 @@ def join_codes(request):
 
     body = parse_body(request)
     role = str(body.get("role", User.Role.MEMBER)).strip()
-    if role not in MINTABLE.get(actor.role, ()):
+    if role not in _mintable_roles(actor):
         return json_error(f"You cannot create a join code granting {role!r}", 400)
 
     try:
@@ -283,7 +286,7 @@ def revoke_join_code(request, code):
     denied = require(request.fv_user, Action.MANAGE_MEMBERS)
     if denied:
         return denied
-    mintable = MINTABLE.get(request.fv_user.role, ())
+    mintable = _mintable_roles(request.fv_user)
     updated = JoinCode.objects.filter(
         code=code, org=request.fv_org, grants_role__in=mintable
     ).update(revoked=True)
@@ -367,6 +370,11 @@ def org_settings(request):
         confirm = str(body.get("confirmName", "")).strip()
         if confirm != org.name:
             return json_error("Type the organisation's exact name to confirm deletion", 400)
+        # add_audit is tenant-routed (AuditLog lives in this org's own
+        # database, never the control plane), so this row is written to the
+        # tenant DB right before org.delete() below removes the only
+        # control-plane record of it -- it survives, but orphaned and
+        # unreachable through this app afterward.
         add_audit(request.fv_user.id, "delete", "org", org.id, f'Organisation "{org.name}" deleted')
         org.delete()
         return JsonResponse({"success": True})
@@ -399,9 +407,20 @@ def org_settings(request):
         updates.append("storage_config")
 
     if "ai" in body:
+        from dataclasses import asdict
+
         from apps.ledger.receipt_extractor import check_ai_config, parse_ai_config
 
-        raw = _json.dumps(body["ai"])
+        ai_body = body["ai"]
+        if isinstance(ai_body, dict) and "fallback" not in ai_body:
+            # The UI's AI settings form only ever sends {primary} (see
+            # OrgSettingsModal.jsx) -- without this, saving it would silently
+            # wipe out a fallback configured earlier through this same
+            # wholesale overwrite. An explicit "fallback": null still clears it.
+            stored_fallback = parse_ai_config(org.ai_config)["fallback"]
+            if stored_fallback:
+                ai_body = {**ai_body, "fallback": asdict(stored_fallback)}
+        raw = _json.dumps(ai_body)
         parsed = parse_ai_config(raw)
         if not parsed["primary"] and not parsed["fallback"]:
             return json_error("No usable AI provider in that configuration", 400)

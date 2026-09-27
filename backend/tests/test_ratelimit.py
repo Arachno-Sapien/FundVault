@@ -35,11 +35,6 @@ class RateLimitTests(SimpleTestCase):
         self.assertEqual(refused.status_code, 429)
         self.assertIn("Too many requests", json.loads(refused.content)["error"])
 
-    def test_the_cache_clear_in_setup_isolates_tests(self):
-        # Byte-identical to the test above. It only passes because setUp reset
-        # the counter that test left at the limit.
-        self.assertEqual(self._exhaust().status_code, 429)
-
     def test_it_stays_refused_for_the_rest_of_the_window(self):
         self._exhaust()
         self.assertEqual(self._call().status_code, 429)

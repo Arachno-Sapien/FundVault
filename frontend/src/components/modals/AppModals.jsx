@@ -1,6 +1,6 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 
-import { fmt, formatDate, formatDateShort, nowInput } from "lib/format";
+import { fmt, formatDate, formatDateShort } from "lib/format";
 import { ACTIONS, can } from "lib/permissions";
 import { extractReceipt } from "lib/api";
 import Modal from "components/modals/Modal";
@@ -28,6 +28,8 @@ export default function AppModals({
   const close = key => setModals(prev => ({ ...prev, [key]: false }));
   const isFirstTransaction = (state.transactions || []).filter(txn => !txn.is_voided).length === 0;
 
+  const [submitting, setSubmitting] = useState(false);
+
   // ── AI Receipt extraction local state ───
   const [extracting, setExtracting] = useState(false);
   const [rawFile, setRawFile] = useState(null);
@@ -51,7 +53,7 @@ export default function AppModals({
     }
   }, [modals.txn]);
 
-  const processImageFile = useCallback((file) => {
+  const processImageFile = (file) => {
     if (!file) return;
     if (!file.type.startsWith("image/")) {
       actions.toast("Please select an image file", "error");
@@ -67,9 +69,9 @@ export default function AppModals({
     const reader = new FileReader();
     reader.onload = e => actions.setTxnForm(prev => ({ ...prev, receiptImage: e.target.result }));
     reader.readAsDataURL(file);
-  }, [actions]);
+  };
 
-  const handlePaste = useCallback((e) => {
+  const handlePaste = (e) => {
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
@@ -80,16 +82,16 @@ export default function AppModals({
         return;
       }
     }
-  }, [processImageFile]);
+  };
 
-  const handleDrop = useCallback((e) => {
+  const handleDrop = (e) => {
     e.preventDefault();
     setDragOver(false);
     const file = e.dataTransfer?.files?.[0];
     if (file) processImageFile(file);
-  }, [processImageFile]);
+  };
 
-  const handleImageUrl = useCallback(async () => {
+  const handleImageUrl = async () => {
     const url = imageUrl.trim();
     if (!url) return;
     try {
@@ -106,7 +108,7 @@ export default function AppModals({
     } catch {
       actions.toast("Could not load image from URL", "error");
     }
-  }, [imageUrl, actions, processImageFile]);
+  };
 
   const confidenceBadge = (fieldHasValue) => {
     if (extractConfidence === null || !fieldHasValue) return null;
@@ -161,14 +163,23 @@ export default function AppModals({
     }
   };
 
-  const exportCSV = () => {
-    if (!state.currentDb) return;
+  // Both exports filter the same active-transactions-by-date-range slice;
+  // dateFrom/dateTo are plain YYYY-MM-DD values from a date input, parsed as
+  // local wall-clock time (not UTC midnight) so the range matches what the
+  // user picked.
+  const filterExportTxns = () => {
     const txns = (state.transactions || []).filter(txn => !txn.is_voided);
     const from = state.exportForm.dateFrom;
     const to = state.exportForm.dateTo;
     let filtered = txns;
-    if (from) filtered = filtered.filter(txn => new Date(txn.date) >= new Date(from));
+    if (from) filtered = filtered.filter(txn => new Date(txn.date) >= new Date(`${from}T00:00:00`));
     if (to) filtered = filtered.filter(txn => new Date(txn.date) <= new Date(`${to}T23:59:59`));
+    return filtered;
+  };
+
+  const exportCSV = () => {
+    if (!state.currentDb) return;
+    const filtered = filterExportTxns();
 
     const headers = ["Date", "Type", "Amount", "Sender", "Receiver", "Mode", "Location", "Notes", "Running Balance"];
     const rows = filtered.map(txn => [
@@ -204,12 +215,7 @@ export default function AppModals({
 
   const exportPDF = async () => {
     if (!state.currentDb) return;
-    const txns = (state.transactions || []).filter(txn => !txn.is_voided);
-    const from = state.exportForm.dateFrom;
-    const to = state.exportForm.dateTo;
-    let filtered = txns;
-    if (from) filtered = filtered.filter(txn => new Date(txn.date) >= new Date(from));
-    if (to) filtered = filtered.filter(txn => new Date(txn.date) <= new Date(`${to}T23:59:59`));
+    const filtered = filterExportTxns();
 
     // Totals must agree with the balance, which only counts approved rows; the
     // PDF table below still lists pending ones.
@@ -543,7 +549,7 @@ export default function AppModals({
                 fontSize: ".8rem",
                 cursor: "pointer",
                 transition: "all .2s",
-                background: dragOver ? "rgba(var(--accent-rgb, 99,102,241), 0.08)" : "transparent",
+                background: dragOver ? "color-mix(in srgb, var(--accent) 8%, transparent)" : "transparent",
                 minWidth: 120,
               }}
               onClick={() => fileInputRef.current?.click()}
@@ -580,7 +586,7 @@ export default function AppModals({
                 style={{ whiteSpace: "nowrap", marginTop: 4 }}
               >
                 {extracting ? (
-                  <><span className="spinner" style={{ width: 14, height: 14, border: "2px solid var(--muted)", borderTopColor: "var(--accent)", borderRadius: "50%", display: "inline-block", animation: "spin .6s linear infinite", marginRight: 6, verticalAlign: "middle" }} /> Extracting...</>
+                  <><span className="spinner" /> Extracting...</>
                 ) : (
                   "✨ Extract Data"
                 )}
@@ -597,19 +603,28 @@ export default function AppModals({
             </div>
           )}
         </div>
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         <div className="form-actions">
           <button className="btn btn-ghost" onClick={() => close("txn")}>
             Cancel
           </button>
-          <button className="btn btn-primary" onClick={() => actions.submitTransaction(rawFile)}>
-            Record Transaction →
+          <button
+            className="btn btn-primary"
+            disabled={submitting}
+            onClick={async () => {
+              setSubmitting(true);
+              try {
+                await actions.submitTransaction(rawFile);
+              } finally {
+                setSubmitting(false);
+              }
+            }}
+          >
+            {submitting ? "Recording…" : "Record Transaction →"}
           </button>
         </div>
       </Modal>
 
       <Modal open={modals.editTxn} id="editTxnModal" title="Edit Transaction" onClose={() => close("editTxn")} large>
-        <input type="hidden" value={state.editTxnForm.id || ""} />
         <div className="form-row">
           <div className="form-group">
             <label>Amount (₹)</label>
@@ -844,9 +859,12 @@ export default function AppModals({
               </div>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              <button className="btn btn-outline btn-sm" onClick={() => actions.editManagedUser(user)}>
-                ✏️ Edit
-              </button>
+              {/* Only the Owner may edit the Owner's row (the API returns 403 otherwise). */}
+              {(user.role !== "owner" || user.id === state.currentUser?.id) && (
+                <button className="btn btn-outline btn-sm" onClick={() => actions.editManagedUser(user)}>
+                  ✏️ Edit
+                </button>
+              )}
               {/* Only the Owner changes roles, and the Owner's own role moves only by transfer. */}
               {can(state.currentUser, ACTIONS.CHANGE_ROLE) && user.role !== "owner" && (
                 <select
@@ -860,13 +878,18 @@ export default function AppModals({
                   <option value="viewer">Viewer</option>
                 </select>
               )}
-              <button className="btn btn-outline btn-sm" onClick={() => actions.toggleManagedUserStatus(user)}>
-                {user.is_active ? "Deactivate" : "Activate"}
-              </button>
-              <button className="btn btn-outline btn-sm" onClick={() => actions.resetManagedUserPassword(user)}>
-                🔐 Reset Password
-              </button>
-              {user.id !== state.currentUser?.id && (
+              {user.id !== state.currentUser?.id && user.role !== "owner" && (
+                <button className="btn btn-outline btn-sm" onClick={() => actions.toggleManagedUserStatus(user)}>
+                  {user.is_active ? "Deactivate" : "Activate"}
+                </button>
+              )}
+              {/* Backend always rejects resetting the Owner's password unless the actor can transfer ownership. */}
+              {(user.role !== "owner" || can(state.currentUser, ACTIONS.TRANSFER_OWNERSHIP)) && (
+                <button className="btn btn-outline btn-sm" onClick={() => actions.resetManagedUserPassword(user)}>
+                  🔐 Reset Password
+                </button>
+              )}
+              {user.id !== state.currentUser?.id && user.role !== "owner" && (
                 <button className="btn btn-danger btn-sm" onClick={() => actions.deleteManagedUser(user)}>
                   🗑️ Delete
                 </button>

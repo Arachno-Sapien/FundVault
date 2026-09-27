@@ -1,4 +1,3 @@
-import bcrypt
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.http import JsonResponse
@@ -9,24 +8,19 @@ from apps.accounts.models import Session, User
 from apps.accounts.permissions import Action, require
 from apps.accounts.serializers import serialize_user
 from apps.common.audit import add_audit
-from apps.common.auth import auth_required, create_session, create_session_token
+from apps.common.auth import (
+    auth_required,
+    check_password,
+    create_session,
+    create_session_token,
+    hash_password,
+)
 from apps.common.ratelimit import rate_limit
 from apps.common.utils import json_error, parse_body
-from apps.ledger.models import DatabaseFund, TransactionFund
+from apps.ledger.models import AuditLog, DatabaseFund, TransactionFund, TrashItem
 from apps.orgs.context import current_org_alias
 from apps.orgs.models import EmailIndex
 from apps.orgs.serializers import serialize_org_summary
-
-
-def _hash_password(raw_password):
-    return bcrypt.hashpw(raw_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
-
-def _check_password(raw_password, hashed):
-    try:
-        return bcrypt.checkpw(raw_password.encode("utf-8"), hashed.encode("utf-8"))
-    except ValueError:
-        return False
 
 
 def _other_active_owner_count(user_id):
@@ -64,11 +58,20 @@ def login(request):
     username_or_email = str(payload.get("username", "")).strip()
     password = str(payload.get("password", ""))
 
-    user = User.objects.filter(username=username_or_email).first()
+    # A member can set their own username to anything, including another
+    # member's email address -- match on either field and let the password
+    # decide which account this login means, rather than letting a username
+    # match win by construction and lock the real email owner out. At most
+    # two rows come back (one per matching field, ORed) so this is at most
+    # two bcrypt checks, not an unbounded scan.
+    candidates = User.objects.filter(
+        Q(username=username_or_email) | Q(email=username_or_email.lower())
+    )
+    user = next(
+        (candidate for candidate in candidates if check_password(password, candidate.password_hash)),
+        None,
+    )
     if not user:
-        user = User.objects.filter(email=username_or_email.lower()).first()
-
-    if not user or not _check_password(password, user.password_hash):
         return json_error("Invalid credentials", 401)
     if not user.is_active:
         return json_error("Account is inactive", 403)
@@ -121,14 +124,28 @@ def me(request):
     if not next_username or not next_email:
         return json_error("Username and email are required", 400)
 
+    # Sent with every login and /auth/me response, so an unbounded value would
+    # bloat every session payload -- the frontend only ever produces a resized
+    # JPEG data URL (~20 KB, see FundVaultApp.jsx's updateProfileImage), so a
+    # generous cap here still passes anything legitimate.
+    if profile_image not in (None, "") and not (
+        isinstance(profile_image, str)
+        and profile_image.startswith("data:image/")
+        and len(profile_image) <= 300_000
+    ):
+        return json_error("Invalid profile image", 400)
+
     update_fields = ["username", "email", "profile_image", "updated_at"]
     if new_password:
         if len(new_password) < 6:
             return json_error("Password must be at least 6 characters", 400)
         if new_password != confirm_password:
             return json_error("Passwords do not match", 400)
-        if not _check_password(current_password, user.password_hash):
-            return json_error("Current password is incorrect", 401)
+        if not check_password(current_password, user.password_hash):
+            # 401 reads as an expired session to the frontend (see api.js),
+            # which signs the user out -- a wrong current password is a plain
+            # validation failure, not an auth failure.
+            return json_error("Current password is incorrect", 400)
         update_fields.append("password_hash")
 
     if profile_image == "":
@@ -144,7 +161,7 @@ def me(request):
             user.email = next_email
             user.profile_image = profile_image
             if new_password:
-                user.password_hash = _hash_password(new_password)
+                user.password_hash = hash_password(new_password)
             user.updated_at = timezone.now()
             user.save(update_fields=update_fields)
             if next_email != old_email:
@@ -219,16 +236,25 @@ def admin_user_detail(request, user_id):
         if not next_username or not next_email:
             return json_error("Username and email are required", 400)
 
+        # An Admin (MANAGE_MEMBERS) may edit their own row and any non-Owner
+        # row freely, but reaching the Owner's row at all -- even just a
+        # rename -- needs the same capability a real handover needs (mirrors
+        # admin_reset_password). The Owner editing themselves is exempt.
+        if target.role == User.Role.OWNER and target.id != request.fv_user.id:
+            denied = require(request.fv_user, Action.TRANSFER_OWNERSHIP)
+            if denied:
+                return denied
+
         if next_role != target.role:
             denied = require(request.fv_user, Action.CHANGE_ROLE)
             if denied:
                 return denied
-        if next_role == User.Role.OWNER:
-            return json_error(
-                "Use transfer-ownership to make someone the Owner", 400
-            )
-        if next_role not in (User.Role.ADMIN, User.Role.MEMBER, User.Role.VIEWER):
-            return json_error("Invalid role", 400)
+            if next_role == User.Role.OWNER:
+                return json_error(
+                    "Use transfer-ownership to make someone the Owner", 400
+                )
+            if next_role not in (User.Role.ADMIN, User.Role.MEMBER, User.Role.VIEWER):
+                return json_error("Invalid role", 400)
         if request.fv_user.id == target.id and not next_is_active:
             return json_error("You cannot deactivate your own account", 400)
 
@@ -242,12 +268,23 @@ def admin_user_detail(request, user_id):
             # Tenant-routed model -- see the comment on `me` above.
             with transaction.atomic(using=current_org_alias()):
                 old_email = target.email
+                role_changed = next_role != target.role
+                active_changed = next_is_active != target.is_active
                 target.username = next_username
                 target.email = next_email
                 target.role = next_role
                 target.is_active = next_is_active
                 target.updated_at = timezone.now()
-                target.save(update_fields=["username", "email", "role", "is_active", "updated_at"])
+                # Only the fields that actually changed: role/is_active are
+                # left out otherwise so this save can't clobber a concurrent
+                # transfer_ownership (or another admin_user_detail call) that
+                # touched only one of them between our read and this write.
+                update_fields = ["username", "email", "updated_at"]
+                if role_changed:
+                    update_fields.append("role")
+                if active_changed:
+                    update_fields.append("is_active")
+                target.save(update_fields=update_fields)
                 if next_email != old_email:
                     # Keep org discovery pointed at the address they now use.
                     EmailIndex.objects.filter(email=old_email, org=request.fv_org).update(
@@ -275,8 +312,6 @@ def admin_user_detail(request, user_id):
 
         # Tenant-routed model -- see the comment on `me` above.
         with transaction.atomic(using=current_org_alias()):
-            from apps.ledger.models import AuditLog, TrashItem
-
             # Reassigned, not deleted: their soft-deleted funds must stay
             # restorable by whoever is left to administer the org, not become
             # permanently stuck in trash just because the deleter's account
@@ -332,7 +367,7 @@ def admin_reset_password(request, user_id):
 
     # Tenant-routed model -- see the comment on `me` above.
     with transaction.atomic(using=current_org_alias()):
-        target.password_hash = _hash_password(new_password)
+        target.password_hash = hash_password(new_password)
         target.updated_at = timezone.now()
         target.save(update_fields=["password_hash", "updated_at"])
         Session.objects.filter(user_id=user_id).delete()

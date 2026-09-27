@@ -53,8 +53,9 @@ user was last active, only when they logged in.
 ## Organisation Endpoints
 
 These back org creation, joining, and org-level settings. Except for
-`GET|PUT /api/orgs/settings`, none of these require a bearer token — that's
-the point of them.
+`GET|PUT|DELETE /api/orgs/settings` and `GET|POST /api/orgs/codes` /
+`DELETE /api/orgs/codes/<code>`, none of these require a bearer token —
+that's the point of them.
 
 ### 1. Validate a database connection
 
@@ -83,6 +84,10 @@ Note this always returns `200` — a bad connection string is reported via
 
 - `400`: Database URL required
 - `405`: Method not allowed
+
+Note this endpoint returns `200` even for an unresolvable host — `"ok":
+false` with the message `"Host not found — check the hostname in the
+connection string."` — same as any other bad connection string.
 
 ---
 
@@ -120,7 +125,8 @@ succeeds — a failed attempt leaves nothing behind to retry against.
 
 - `400`: All fields required / Password must be at least 6 characters / a
   connection or migration failure message (e.g. "Authentication failed —
-  check the username and password.", "That host cannot be used.", "An
+  check the username and password.", "That host cannot be used.", "Host not
+  found — check the hostname in the connection string.", "An
   organisation with a similar name already exists — try a different
   name.", or — for an IPv6-only host such as
   Supabase's direct `db.<ref>.supabase.co` — a message pointing at the
@@ -280,18 +286,20 @@ nonexistent code, so existence isn't revealed.
 
 ---
 
-### 7. Get / update organisation settings
+### 7. Get / update / delete organisation settings
 
-**GET|PUT** `/orgs/settings`
+**GET|PUT|DELETE** `/orgs/settings`
 
 **Authentication:** Required (Owner only — this is the one place database,
-storage, and AI credentials can be viewed or changed).
+storage, and AI credentials can be viewed or changed, and the only way to
+delete the organisation).
 
 **GET Response (200):**
 
 ```json
 {
   "org": { "id": "string", "name": "string", "slug": "string", "created_at": "ISO 8601 datetime" },
+  "database": null,
   "storage": null,
   "ai": {
     "primary": null,
@@ -299,6 +307,20 @@ storage, and AI credentials can be viewed or changed).
   }
 }
 ```
+
+When a database connection is configured, `"database"` is instead:
+
+```json
+{
+  "host": "string",
+  "port": "integer (5432 if not specified in the connection string)",
+  "database": "string",
+  "username": "string"
+}
+```
+
+The password is never returned — `urlparse` on the stored connection string
+never surfaces it in these fields, so there is nothing to redact.
 
 When storage is configured, `"storage"` is instead:
 
@@ -327,7 +349,7 @@ Masked values never round-trip a usable secret — a secret 8 characters or
 shorter is masked to `""`. Neither `secret_key` nor `api_key` can be read
 back in full through this endpoint by anyone, including another Owner.
 
-**PUT Request Body:** either or both of:
+**PUT Request Body:** any combination of `storage`, `ai`, and `database`:
 
 ```json
 {
@@ -341,36 +363,93 @@ back in full through this endpoint by anyone, including another Owner.
   "ai": {
     "primary": { "provider": "openai_compatible", "base_url": "string", "model": "string", "api_key": "string" },
     "fallback": { "provider": "gemini", "model": "string", "api_key": "string" }
-  }
+  },
+  "database": { "databaseUrl": "string (postgres:// or postgresql://)" }
 }
 ```
 
-Both `storage` and `ai` are validated with a live probe call before being
+`storage` and `ai` are each validated with a live probe call before being
 saved (a small object round-trip for storage, a cheap list/models call for
 AI) — a bad key or endpoint is rejected here rather than at first use. A
 `storage` or `ai` value that isn't a JSON object — including `null` — is
 treated as an empty configuration and rejected the same way as one missing
 its required fields, rather than clearing the existing configuration; there
-is no way to clear it through this endpoint.
+is no way to clear either through this endpoint.
+
+Sending `"ai": { "primary": {...} }` without a `"fallback"` key keeps
+whatever fallback provider is already configured, instead of deleting it —
+the settings UI only ever sends `primary`. Send `"fallback": null`
+explicitly to clear it.
+
+`database` re-provisions the org onto a different Postgres connection:
+`migrate_org_database` probes and migrates the new database and switches
+`db_connection` over immediately, ahead of `org.save()` for the other
+sections. Because of that side effect, `database` is always processed
+**last** — after `storage` and `ai` have already been validated (and saved)
+— so a request combining all three fails on the earlier sections, if it's
+going to fail, before the org's live database is repointed. Only a
+required-field error and DNS/connection failures are checked, not a live
+probe like `storage`/`ai` use, since `migrate_org_database` itself does the
+real connect-and-migrate.
 
 **PUT Response (200):**
 
 ```json
-{ "success": true, "updated": ["storage_config", "ai_config"] }
+{ "success": true, "updated": ["storage_config", "ai_config", "db_connection"] }
 ```
+
+`updated` lists only the sections actually present in the request body, in
+the order they were processed (`storage_config`, `ai_config`, then
+`db_connection` last).
 
 **Error Responses:**
 
 - `400`: Storage config is missing: ... / Storage check failed: ... / No
   usable AI provider in that configuration / AI provider check failed: ... /
-  Nothing to update
+  database must be an object / Database URL required / a connection or
+  migration failure message (see [Create an organisation](#2-create-an-organisation),
+  including "Host not found — check the hostname in the connection string."
+  for a host that fails to resolve) / Nothing to update
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `405`: Method not allowed
 
 ---
 
-### 8. Health check
+### 8. Delete an organisation
+
+**DELETE** `/orgs/settings`
+
+**API only (no UI).** Deletes the control-plane `Org` row (cascading to its
+join codes and email-index rows). The org's tenant database itself is never
+touched — another org's `db_connection` could point at the same physical
+database — so nothing is dropped there. An audit entry is written to the
+tenant database immediately before the org row is deleted; it survives, but
+becomes unreachable through the app once the org row (the only control-plane
+record of it) is gone.
+
+**Request Body:**
+
+```json
+{ "confirmName": "string (required, must exactly match the organisation's name)" }
+```
+
+**Response (200):**
+
+```json
+{ "success": true }
+```
+
+**Error Responses:**
+
+- `400`: Type the organisation's exact name to confirm deletion
+- `401`: Unauthorized
+- `403`: You do not have permission to do that
+- `405`: Method not allowed
+
+---
+
+### 9. Health check
 
 **GET** `/health`
 
@@ -432,6 +511,12 @@ code."
   "password": "string (required)"
 }
 ```
+
+Matches on **username OR email**: at most two candidate rows come back (one
+per field), and whichever one's password hash checks out wins. This means a
+member whose `username` happens to equal a different member's `email`
+doesn't block that other member from logging in with their email — the
+password, not which field matched, decides the account.
 
 **Response (200):**
 
@@ -528,12 +613,21 @@ a 500.
 Changing the password invalidates every other session for this user (the
 current one is kept).
 
+`profile_image`, when not `null`/`""`, must be a `data:image/...` string of
+at most 300,000 characters (the frontend only ever sends a resized JPEG data
+URL around 20 KB) — anything else is rejected with `400`.
+
 **Error Responses:**
 
-- `400`: Username and email are required / Password must be at least 6
-  characters / Passwords do not match / Username or email already exists
-- `401`: Current password is incorrect / Unauthorized
+- `400`: Username and email are required / Invalid profile image / Password
+  must be at least 6 characters / Passwords do not match / Current password
+  is incorrect / Username or email already exists
+- `401`: Unauthorized
 - `405`: Method not allowed
+
+A wrong `currentPassword` is a `400`, not a `401` — a `401` here would read
+as an expired session to the frontend and sign the user out, which is wrong
+for a plain validation failure.
 
 ---
 
@@ -601,9 +695,18 @@ this path; a `GET` here returns `405`.
 
 **Behavior:**
 
+- Editing the Owner's row at all — even just a rename, with `role` and
+  `is_active` unchanged — requires `TRANSFER_OWNERSHIP` (Owner) when the
+  target isn't the caller themselves; an Admin (`MANAGE_MEMBERS` only) can
+  freely edit their own row and any non-Owner row, but cannot touch the
+  Owner's row even to fix a typo in their username. The Owner editing their
+  own row is exempt from this check.
 - Setting `role` to anything other than the target's current role requires
-  Owner; setting it to `owner` is always rejected — use
-  [transfer-ownership](#5-transfer-ownership) instead.
+  Owner (`CHANGE_ROLE`); setting it to `owner` is always rejected — use
+  [transfer-ownership](#5-transfer-ownership) instead. This message ("Use
+  transfer-ownership...") only fires when `role` is actually changing to
+  `owner` — the Owner can rename their own username/email/other fields
+  through this endpoint without it.
 - You cannot deactivate your own account.
 - An organisation must always have an active Owner — demoting or
   deactivating the sole Owner is rejected.
@@ -615,7 +718,8 @@ this path; a `GET` here returns `405`.
   An organisation must always have an active Owner / Username or email
   already exists
 - `401`: Unauthorized
-- `403`: You do not have permission to do that
+- `403`: You do not have permission to do that (also returned to an Admin
+  reaching the Owner's row without `TRANSFER_OWNERSHIP`, per the rule above)
 - `404`: User not found
 - `405`: Method not allowed
 
@@ -679,7 +783,7 @@ Resets the password and deletes all of that user's sessions.
 
 **POST** `/admin/users/<user_id>/transfer-ownership`
 
-Hands Owner to another active member; the caller becomes Admin. Requires
+**API only (no UI).** Hands Owner to another active member; the caller becomes Admin. Requires
 Owner. Guarded against a race between two concurrent transfer attempts from
 the same Owner with `select_for_update()` — the second request re-reads the
 caller's role after the first commits and is rejected if it's no longer
@@ -720,7 +824,7 @@ open to any role, including Viewer.
 [
   {
     "id": "string",
-    "created_by": "string (user id)",
+    "created_by": "string (user id) or null (creator's account was deleted)",
     "name": "string",
     "description": "string",
     "balance": "float",
@@ -778,7 +882,7 @@ open to any role, including Viewer.
 ```json
 {
   "id": "string",
-  "created_by": "string",
+  "created_by": "string or null (creator's account was deleted)",
   "name": "string",
   "description": "string",
   "balance": "float",
@@ -948,6 +1052,10 @@ Admin/Owner may approve their own transaction).
 
 **GET** `/databases/<database_id>/transactions`
 
+**API only (no UI).** The frontend gets a fund's transactions from
+`GET /databases/<database_id>` instead (its `transactions` array, same
+shape as below); this standalone list endpoint is not called by the app.
+
 **Response (200):**
 
 ```json
@@ -980,7 +1088,7 @@ Admin/Owner may approve their own transaction).
     "void_reason": "string or null",
     "voided_by": "string or null",
     "voided_at": "ISO 8601 datetime or null",
-    "created_by": "string (user id)",
+    "created_by": "string (user id) or null (creator's account was deleted)",
     "created_at": "ISO 8601 datetime"
   }
 ]
@@ -1247,11 +1355,10 @@ Note the field name is `image`, not `file`.
 }
 ```
 
-On failure, the response is `{"error": "string"}` — and note this is
-returned with HTTP `200`, *not* an error status, whenever extraction was
-attempted and failed (both providers errored, or the response couldn't be
-parsed as JSON). The only case that gets a non-200 status is no AI provider
-being configured at all for this organisation, which returns `503`.
+On failure, the response is `{"error": "string"}` returned with HTTP `502`
+(both providers errored, or the response couldn't be parsed as JSON). The
+only other non-200 case is no AI provider being configured at all for this
+organisation, which returns `503`.
 
 **Error Responses:**
 
@@ -1259,6 +1366,8 @@ being configured at all for this organisation, which returns `503`.
 - `401`: Unauthorized
 - `403`: You do not have permission to do that
 - `405`: Method not allowed
+- `502`: extraction failed (returned inside the normal `{"error": ...}` body
+  described above, not a separate shape)
 - `503`: Receipt extraction is not configured for this organisation. An
   Owner can add an AI provider in organisation settings. (returned inside the
   normal `{"error": ...}` body, not a separate shape)
@@ -1278,6 +1387,13 @@ the old key differs (a transaction copied by `databases_merge`, which keeps
 its original key) has the old object removed from storage after commit,
 unless another row still references it.
 
+The transaction's creator can always attach/replace its receipt; anyone else
+with only `CREATE_TXN` (a Member acting on another member's transaction)
+needs `MODIFY_TXN` (Admin/Owner) too, since the key is deterministic and
+would otherwise let any Member overwrite someone else's receipt — including
+on an already-approved or voided transaction. Refused with `400` if the
+transaction's fund is archived.
+
 **Request Body:**
 
 ```text
@@ -1295,9 +1411,10 @@ image: <image file, up to 5 MB>
 **Error Responses:**
 
 - `400`: No image file provided / Image must be less than 5 MB / That file
-  is not a readable image
+  is not a readable image / This fund is archived
 - `401`: Unauthorized
-- `403`: You do not have permission to do that
+- `403`: You do not have permission to do that (includes a non-creator
+  Member without `MODIFY_TXN`, see above)
 - `404`: Transaction not found
 - `405`: Method not allowed
 - `502`: Could not upload the receipt: `<reason>`
@@ -1382,6 +1499,7 @@ there would never fire (recurring processing skips archived funds).
 **DELETE** `/recurring/<recurring_id>`
 
 Deactivates it (`is_active` becomes `false`) rather than removing the row.
+Writes an audit entry (`delete`, `recurring`).
 
 **Response (200):**
 
@@ -1408,6 +1526,18 @@ frontend fires this on every app load) never post the same due rule twice —
 the second caller locks after the first and sees its already-advanced
 `next_run`. A rule on an archived fund is skipped entirely — not advanced,
 not posted — so it runs normally as soon as the fund is unarchived.
+
+Each rule posts **at most one** occurrence per call, dated at the moment
+this endpoint runs (not `next_run`) — a rule left unprocessed for several
+periods (e.g. the app wasn't opened for two months) does not back-post the
+missed occurrences; `next_run` still only advances by one period per call,
+so it catches up one occurrence at a time on subsequent calls.
+
+A debit that would overdraw the fund is skipped for that occurrence — no
+transaction is created and nothing is added to the audit log — but
+`next_run` still advances, same as a successfully posted occurrence; the
+missed occurrence is not retried, only the next one (once `next_run` next
+falls due).
 
 Advancing `next_run` clamps day-of-month like the monthly frequency does: a
 `yearly` rule due on Feb 29 advances to Feb 28 in a non-leap next year, and
@@ -1509,6 +1639,13 @@ just their own.
 
 **POST** `/trash/<item_id>/restore`
 
+Writes an audit entry (`update`) whose `entity_id`/message name the
+**restored fund's own id/name**, not the deleted `TrashItem`'s id. If a
+concurrent purge already hard-deleted the fund, this answers `404` and
+removes the now-stale trash row instead of restoring anything. The restore
+(fund update, trash-row delete, and audit write) runs inside a single atomic
+transaction.
+
 **Response (200):**
 
 ```json
@@ -1539,6 +1676,12 @@ window before this ran -- a stale trash item from a double-submitted delete,
 or a restore racing this call -- the fund and its transactions are left
 alone; only the stale trash row itself is removed.
 
+Writes an audit entry (`delete`, `database`) for the purge, with `entity_id`
+and the message naming the **purged fund's own id/name**, not the deleted
+`TrashItem`'s id. The purge (fund lookup, receipt cleanup, row deletes, and
+the audit write) runs inside a single atomic transaction, so a failure
+partway through rolls back all of it rather than leaving a partial delete.
+
 **Response (200):**
 
 ```json
@@ -1559,7 +1702,7 @@ alone; only the stale trash row itself is removed.
 **DELETE** `/trash`
 
 Permanently deletes every item in the organisation's trash, including the
-same per-item receipt cleanup as above.
+same per-item receipt cleanup and per-item audit entries as above.
 
 **Response (200):**
 
@@ -1744,6 +1887,12 @@ code — so the limit raises the cost of a brute force without ending it. The
 org lookup is capped because it answers "does this email belong to anyone
 here" for any address handed to it.
 
+The per-IP key is `request.META["REMOTE_ADDR"]` — the socket peer address,
+not a forwarded-for header. Behind a reverse proxy or load balancer, every
+client shares the proxy's address, so the limits above are effectively
+per-proxy, not per-real-client, unless the deployment terminates TLS itself
+or otherwise sets `REMOTE_ADDR` to the original client IP.
+
 Counters live in Django's cache, left at the default LocMemCache: per
 process, so a deployment running N workers effectively allows N times the
 numbers above, and a restart resets them. Pointing `CACHES` at a shared
@@ -1767,7 +1916,7 @@ previous result rather than calling the provider again.
 
 `python backend/manage.py migrate_tenants` applies pending tenant migrations
 to every registered organisation's database — not exposed as an API endpoint,
-it is run by every deploy (see the README's [Deployment](README.md#deployment)
+it is run by every deploy (see the README's [Deployment](../README.md#deployment)
 section) after the control-plane migration. An organisation whose database
 can't be reached is reported and skipped rather than failing the whole run.
 
@@ -1793,6 +1942,17 @@ can't be reached is reported and skipped rather than failing the whole run.
   required fields answer `400`; an endpoint with no required fields (e.g.
   `PUT /transactions/<transaction_id>`) simply treats it as a no-op edit and
   returns `200`.
+- On a create/replace body (not a `PUT` edit that distinguishes an absent key
+  from an explicit one — see the `PUT /transactions/<transaction_id>` and
+  `PUT /auth/me`/`PUT /admin/users/<user_id>` notes above), a string field —
+  `name`/`description` (`POST|PUT /databases`, `POST /databases/merge`),
+  `sourceId`/`targetId` (`POST /databases/merge`), `reason`
+  (`POST /transactions/<transaction_id>/void`), `description`
+  (`POST /databases/<database_id>/recurring`) — reads an explicit JSON
+  `null` the same as an omitted or empty value (`""`), never the literal
+  string `"None"`. A required field left `null` this way still fails its own
+  required-field check (e.g. an omitted or `null` void `reason` is rejected
+  with `Void reason required`).
 - Receipts are never stored inline as base64 — only an object key
   (`receipt_key`) plus a signed URL minted at read time (`receipt_url`,
   ~1 hour validity). An org without storage configured simply has no

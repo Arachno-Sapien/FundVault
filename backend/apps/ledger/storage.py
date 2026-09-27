@@ -40,7 +40,10 @@ def parse_storage_config(raw):
         return None
     if not isinstance(data, dict):  # e.g. a PUT of {"storage": null}
         data = {}
-    missing = [key for key in REQUIRED if not data.get(key)]
+    # A non-str value (e.g. 123) would otherwise reach urlparse()/str.replace()
+    # further down (boto3.client(), _redact()) and 500 instead of being
+    # treated as missing here.
+    missing = [key for key in REQUIRED if not isinstance(data.get(key), str) or not data[key]]
     if missing:
         raise StorageNotConfigured(f"Storage config is missing: {', '.join(missing)}")
     return StorageConfig(

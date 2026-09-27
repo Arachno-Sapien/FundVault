@@ -327,6 +327,26 @@ class LedgerMoneyTests(OrgTestMixin, TestCase):
         self.assertEqual(txn.running_balance, 60.0)
         self.assertEqual(self._fund().balance, 60.0)
 
+    def test_update_response_carries_the_post_edit_running_balance(self):
+        # recalculate_running_balances writes the real value with a queryset
+        # bulk_update(), which the in-memory `txn` used to build the response
+        # never sees on its own without an explicit refresh.
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.create(
+                id="t0", database_id="f1", type="credit", amount=100.0,
+                date=timezone.now() - timedelta(days=1), mode="cash", running_balance=100.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            TransactionFund.objects.create(
+                id="t1", database_id="f1", type="debit", amount=30.0,
+                date=timezone.now(), mode="cash", running_balance=70.0,
+                approved=True, requires_approval=False, created_by_id="u_owner",
+            )
+            DatabaseFund.objects.filter(id="f1").update(balance=70.0)
+        response = self._send("put", "/api/transactions/t1", {"amount": 40.0})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["running_balance"], 60.0)
+
     def test_update_allowed_when_a_void_already_left_the_fund_negative(self):
         # transaction_void has no balance check, so voiding a credit that was
         # already spent can leave the fund negative on its own. The item-2

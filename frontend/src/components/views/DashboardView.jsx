@@ -21,8 +21,10 @@ Chart.register(
 function getMonthlyData(txns) {
   const months = {};
   txns.forEach(t => {
-    const month = (t.date || "").slice(0, 7);
-    if (!month) return;
+    if (!t.date) return;
+    const d = new Date(t.date);
+    if (Number.isNaN(d.getTime())) return;
+    const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
     if (!months[month]) months[month] = { credits: 0, debits: 0 };
     if (t.type === "credit") months[month].credits += Number(t.amount || 0);
     else months[month].debits += Number(t.amount || 0);
@@ -30,7 +32,10 @@ function getMonthlyData(txns) {
 
   const sorted = Object.keys(months).sort().slice(-6);
   return {
-    labels: sorted.map(m => new Date(`${m}-01`).toLocaleDateString("en-IN", { month: "short", year: "2-digit" })),
+    labels: sorted.map(m => {
+      const [y, mm] = m.split("-");
+      return new Date(Number(y), Number(mm) - 1, 1).toLocaleDateString("en-IN", { month: "short", year: "2-digit" });
+    }),
     credits: sorted.map(m => months[m].credits),
     debits: sorted.map(m => months[m].debits)
   };
@@ -40,9 +45,8 @@ export default function DashboardView({ databases, overview, theme }) {
   const monthlyRef = useRef(null);
   const modeRef = useRef(null);
   const balanceRef = useRef(null);
-  const chartRefs = useRef({});
 
-  const activeDbs = useMemo(() => databases.filter(db => !db.is_deleted), [databases]);
+  const activeDbs = useMemo(() => databases.filter(db => !db.is_deleted && !db.is_archived), [databases]);
   const allTxns = useMemo(
     () =>
       activeDbs.flatMap(db =>
@@ -52,16 +56,14 @@ export default function DashboardView({ databases, overview, theme }) {
   );
 
   useEffect(() => {
-    Object.values(chartRefs.current).forEach(c => c?.destroy());
-    chartRefs.current = {};
-
+    const charts = {};
     const isDark = theme !== "light";
     const textColor = isDark ? "#e8e0ff" : "#0a1929";
     const gridColor = isDark ? "rgba(139, 122, 160, 0.2)" : "rgba(0, 0, 0, 0.1)";
 
     const monthly = getMonthlyData(allTxns);
     if (monthlyRef.current) {
-      chartRefs.current.monthly = new Chart(monthlyRef.current, {
+      charts.monthly = new Chart(monthlyRef.current, {
         type: "bar",
         data: {
           labels: monthly.labels,
@@ -86,7 +88,7 @@ export default function DashboardView({ databases, overview, theme }) {
       const electronic = allTxns.filter(t => t.mode === "electronic").length;
       const cheque = allTxns.filter(t => t.mode === "cheque").length;
       const cash = allTxns.filter(t => t.mode === "cash").length;
-      chartRefs.current.modes = new Chart(modeRef.current, {
+      charts.modes = new Chart(modeRef.current, {
         type: "pie",
         data: {
           labels: ["Electronic", "Cheque", "Cash"],
@@ -97,9 +99,7 @@ export default function DashboardView({ databases, overview, theme }) {
     }
 
     if (balanceRef.current) {
-      const sorted = [...allTxns]
-        .filter(t => t.approved && !t.is_voided)
-        .sort((a, b) => new Date(a.date) - new Date(b.date));
+      const sorted = [...allTxns].sort((a, b) => new Date(a.date) - new Date(b.date));
       let running = 0;
       const labels = [];
       const values = [];
@@ -108,7 +108,7 @@ export default function DashboardView({ databases, overview, theme }) {
         labels.push(new Date(tx.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" }));
         values.push(running);
       });
-      chartRefs.current.balance = new Chart(balanceRef.current, {
+      charts.balance = new Chart(balanceRef.current, {
         type: "line",
         data: {
           labels: labels.slice(-30),
@@ -135,7 +135,7 @@ export default function DashboardView({ databases, overview, theme }) {
       });
     }
 
-    return () => Object.values(chartRefs.current).forEach(c => c?.destroy());
+    return () => Object.values(charts).forEach(c => c.destroy());
   }, [allTxns, theme]);
 
   return (

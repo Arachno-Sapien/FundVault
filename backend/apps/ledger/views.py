@@ -68,12 +68,62 @@ def _parse_iso_datetime(raw):
         return None
 
 
-def _get_fund(database_id, include_deleted=False):
+def _get_fund(database_id):
     """Look up a fund in the caller's org (the tenant connection is the org boundary)."""
-    query = DatabaseFund.objects.filter(id=database_id)
-    if not include_deleted:
-        query = query.filter(is_deleted=False)
-    return query.first()
+    return DatabaseFund.objects.filter(id=database_id, is_deleted=False).first()
+
+
+def _get_txn(transaction_id):
+    """Look up a transaction in the caller's org, in an undeleted fund."""
+    return TransactionFund.objects.filter(id=transaction_id, database__is_deleted=False).first()
+
+
+def _text(payload, key):
+    """A stripped string from JSON input.
+
+    Absent, explicit null, and blank all read as "" -- never the literal
+    "None" that str(payload.get(key, "")) would store for an explicit null.
+    """
+    return str(payload.get(key) or "").strip()
+
+
+def _text_update(body, key, current):
+    """Like _text, but for a PUT that edits `current`: an absent key keeps it,
+    while a present key (including an explicit null) replaces/clears it."""
+    if key not in body:
+        return current
+    return str(body.get(key) or "").strip() or None
+
+
+def _parse_fund_fields(payload):
+    """Shared name/description/threshold parse+validate for fund create and update.
+
+    Returns (fields, None) or (None, an error JsonResponse).
+    """
+    name = _text(payload, "name")
+    description = _text(payload, "description")
+    low_balance_threshold = parse_number(payload.get("lowBalanceThreshold") or 0)
+    approval_threshold = parse_number(payload.get("approvalThreshold") or 0)
+    if not name:
+        return None, json_error("Name required", 400)
+    if low_balance_threshold is None or approval_threshold is None:
+        return None, json_error("Thresholds must be numbers", 400)
+    return {
+        "name": name,
+        "description": description,
+        "low_balance_threshold": low_balance_threshold,
+        "approval_threshold": approval_threshold,
+    }, None
+
+
+def _uploaded_image_or_error(request):
+    """The "image" file from a multipart upload, or (None, a 400 JsonResponse)."""
+    image = request.FILES.get("image")
+    if not image:
+        return None, json_error("No image file provided", 400)
+    if image.size > 5 * 1024 * 1024:
+        return None, json_error("Image must be less than 5 MB", 400)
+    return image, None
 
 
 def _storage_for(request):
@@ -133,23 +183,11 @@ def databases_list_create(request):
         return denied
 
     payload = parse_body(request)
-    name = str(payload.get("name", "")).strip()
-    description = str(payload.get("description", "")).strip()
-    low_balance_threshold = parse_number(payload.get("lowBalanceThreshold") or 0)
-    approval_threshold = parse_number(payload.get("approvalThreshold") or 0)
-    if not name:
-        return json_error("Name required", 400)
-    if low_balance_threshold is None or approval_threshold is None:
-        return json_error("Thresholds must be numbers", 400)
+    fields, error = _parse_fund_fields(payload)
+    if error:
+        return error
 
-    db = DatabaseFund.objects.create(
-        id=uid(),
-        created_by_id=request.fv_user.id,
-        name=name,
-        description=description,
-        low_balance_threshold=low_balance_threshold,
-        approval_threshold=approval_threshold,
-    )
+    db = DatabaseFund.objects.create(id=uid(), created_by_id=request.fv_user.id, **fields)
     add_audit(request.fv_user.id, "create", "database", db.id, f'Database "{db.name}" created')
     return JsonResponse(serialize_database(db))
 
@@ -163,9 +201,9 @@ def databases_merge(request):
     if denied:
         return denied
     payload = parse_body(request)
-    source_id = str(payload.get("sourceId", "")).strip()
-    target_id = str(payload.get("targetId", "")).strip()
-    merged_name = str(payload.get("name", "")).strip()
+    source_id = _text(payload, "sourceId")
+    target_id = _text(payload, "targetId")
+    merged_name = _text(payload, "name")
 
     if not source_id or not target_id or not merged_name:
         return json_error("Source, target, and name are required", 400)
@@ -250,7 +288,7 @@ def database_detail(request, database_id):
         return json_error("Database not found", 404)
 
     if request.method == "GET":
-        txns = TransactionFund.objects.filter(database_id=db.id).order_by("-date")
+        txns = TransactionFund.objects.filter(database_id=db.id).order_by("-date", "-created_at", "-id")
         storage = _storage_for(request)
         payload = serialize_database(db)
         payload["transactions"] = [serialize_transaction(txn, storage) for txn in txns]
@@ -261,20 +299,13 @@ def database_detail(request, database_id):
         if denied:
             return denied
         body = parse_body(request)
-        name = str(body.get("name", "")).strip()
-        description = str(body.get("description", "")).strip()
-        low_balance_threshold = parse_number(body.get("lowBalanceThreshold") or 0)
-        approval_threshold = parse_number(body.get("approvalThreshold") or 0)
-        if not name:
-            return json_error("Name required", 400)
-        if low_balance_threshold is None or approval_threshold is None:
-            return json_error("Thresholds must be numbers", 400)
+        fields, error = _parse_fund_fields(body)
+        if error:
+            return error
 
-        db.name = name
-        db.description = description
-        db.low_balance_threshold = low_balance_threshold
-        db.approval_threshold = approval_threshold
-        db.save(update_fields=["name", "description", "low_balance_threshold", "approval_threshold"])
+        for field, value in fields.items():
+            setattr(db, field, value)
+        db.save(update_fields=list(fields))
         add_audit(request.fv_user.id, "update", "database", db.id, f'Database "{db.name}" updated')
         return JsonResponse(serialize_database(db))
 
@@ -282,15 +313,16 @@ def database_detail(request, database_id):
         denied = require(request.fv_user, Action.MANAGE_FUNDS)
         if denied:
             return denied
-        db.is_deleted = True
-        db.save(update_fields=["is_deleted"])
-        TrashItem.objects.create(
-            id=uid(),
-            entity_type="database",
-            entity_data=json.dumps(serialize_database(db)),
-            deleted_by_id=request.fv_user.id,
-        )
-        add_audit(request.fv_user.id, "delete", "database", db.id, f'Database "{db.name}" deleted')
+        with transaction.atomic(using=current_org_alias()):
+            db.is_deleted = True
+            db.save(update_fields=["is_deleted"])
+            TrashItem.objects.create(
+                id=uid(),
+                entity_type="database",
+                entity_data=json.dumps(serialize_database(db)),
+                deleted_by_id=request.fv_user.id,
+            )
+            add_audit(request.fv_user.id, "delete", "database", db.id, f'Database "{db.name}" deleted')
         return JsonResponse({"success": True})
 
     return json_error("Method not allowed", 405)
@@ -349,7 +381,7 @@ def database_transactions(request, database_id):
         return json_error("Database not found", 404)
 
     if request.method == "GET":
-        rows = TransactionFund.objects.filter(database_id=database_id).order_by("-date", "-created_at")
+        rows = TransactionFund.objects.filter(database_id=database_id).order_by("-date", "-created_at", "-id")
         storage = _storage_for(request)
         return JsonResponse([serialize_transaction(row, storage) for row in rows], safe=False)
 
@@ -368,12 +400,12 @@ def database_transactions(request, database_id):
     # paise at every write; move to DecimalField to drop the rounding.
     amount = round(parse_number(body.get("amount")) or 0, 2)
     tx_date = _parse_iso_datetime(body.get("date"))
-    sender = str(body.get("sender", "")).strip()
-    receiver = str(body.get("receiver", "")).strip()
+    sender = _text(body, "sender")
+    receiver = _text(body, "receiver")
     mode = str(body.get("mode", "")).strip()
     mode_data = body.get("modeData")
-    location = str(body.get("location", "")).strip()
-    notes = str(body.get("notes", "")).strip()
+    location = _text(body, "location")
+    notes = _text(body, "notes")
 
     if tx_type not in ("credit", "debit"):
         return json_error("Invalid transaction type", 400)
@@ -422,15 +454,15 @@ def database_transactions(request, database_id):
             )
         except InsufficientBalance:
             return json_error("Insufficient balance", 400)
+        add_audit(
+            request.fv_user.id,
+            "create",
+            "transaction",
+            txn.id,
+            f'{"Credit" if tx_type == "credit" else "Debit"} of ₹{amount} {"pending approval" if requires_approval else "recorded"}',
+        )
     new_balance = fund.balance
 
-    add_audit(
-        request.fv_user.id,
-        "create",
-        "transaction",
-        txn.id,
-        f'{"Credit" if tx_type == "credit" else "Debit"} of ₹{amount} {"pending approval" if requires_approval else "recorded"}',
-    )
     return JsonResponse(
         {
             "transaction": serialize_transaction(txn, _storage_for(request)),
@@ -449,15 +481,11 @@ def transaction_void(request, transaction_id):
     if denied:
         return denied
     body = parse_body(request)
-    reason = str(body.get("reason", "")).strip()
+    reason = _text(body, "reason")
     if not reason:
         return json_error("Void reason required", 400)
 
-    txn = (
-        TransactionFund.objects.select_related("database")
-        .filter(id=transaction_id, database__is_deleted=False)
-        .first()
-    )
+    txn = _get_txn(transaction_id)
     if not txn:
         return json_error("Transaction not found", 404)
     if txn.is_voided:
@@ -470,14 +498,21 @@ def transaction_void(request, transaction_id):
             return json_error("Database not found", 404)
         if fund.is_archived:
             return json_error("This fund is archived", 400)
-        txn.is_voided = True
-        txn.void_reason = reason
-        txn.voided_by = request.fv_user.username
-        txn.voided_at = timezone.now()
-        txn.save(update_fields=["is_voided", "void_reason", "voided_by", "voided_at"])
+        # is_voided was only checked on the unlocked read above; a second,
+        # concurrent void racing that window would otherwise double-apply (and
+        # double-run recalculate_running_balances). This conditional write is
+        # the authoritative check, made under the fund lock.
+        updated = TransactionFund.objects.filter(id=txn.id, is_voided=False).update(
+            is_voided=True,
+            void_reason=reason,
+            voided_by=request.fv_user.username,
+            voided_at=timezone.now(),
+        )
+        if not updated:
+            return json_error("Transaction is already voided", 400)
         recalculate_running_balances(txn.database_id)
+        add_audit(request.fv_user.id, "void", "transaction", txn.id, f"Transaction voided: {reason}")
 
-    add_audit(request.fv_user.id, "void", "transaction", txn.id, f"Transaction voided: {reason}")
     return JsonResponse({"success": True})
 
 
@@ -492,11 +527,7 @@ def transaction_delete_voided(request, transaction_id):
     if denied:
         return denied
 
-    txn = (
-        TransactionFund.objects.select_related("database")
-        .filter(id=transaction_id, database__is_deleted=False)
-        .first()
-    )
+    txn = _get_txn(transaction_id)
     if not txn:
         return json_error("Transaction not found", 404)
     if not txn.is_voided:
@@ -512,11 +543,16 @@ def transaction_delete_voided(request, transaction_id):
             return json_error("Database not found", 404)
         if fund.is_archived:
             return json_error("This fund is archived", 400)
-        txn.delete()
+        # is_voided was only checked on the unlocked read above; this
+        # conditional delete is the authoritative check, made under the fund
+        # lock, against a concurrent edit/void racing that window.
+        deleted, _ = TransactionFund.objects.filter(id=txn.id, is_voided=True).delete()
+        if not deleted:
+            return json_error("Transaction not found", 404)
         recalculate_running_balances(db_id)
         _delete_receipts_on_commit(request, [txn.receipt_key])
+        add_audit(request.fv_user.id, "delete", "transaction", transaction_id, f"Voided transaction deleted: {txn_desc}")
 
-    add_audit(request.fv_user.id, "delete", "transaction", transaction_id, f"Voided transaction deleted: {txn_desc}")
     return JsonResponse({"success": True})
 
 
@@ -530,11 +566,7 @@ def transaction_approve(request, transaction_id):
     if denied:
         return denied
 
-    txn = (
-        TransactionFund.objects.select_related("database")
-        .filter(id=transaction_id, database__is_deleted=False)
-        .first()
-    )
+    txn = _get_txn(transaction_id)
     if not txn:
         return json_error("Transaction not found", 404)
     if txn.is_voided:
@@ -579,14 +611,14 @@ def transaction_approve(request, transaction_id):
         txn.save(update_fields=["approved", "approved_by", "approved_at"])
         # Rebuilds this row's running balance (it may be backdated) and the fund's.
         new_balance = recalculate_running_balances(locked.id)
+        add_audit(
+            request.fv_user.id,
+            "update",
+            "transaction",
+            txn.id,
+            f"Transaction approved by {request.fv_user.username}",
+        )
 
-    add_audit(
-        request.fv_user.id,
-        "update",
-        "transaction",
-        txn.id,
-        f"Transaction approved by {request.fv_user.username}",
-    )
     return JsonResponse({"success": True, "newBalance": new_balance})
 
 
@@ -599,25 +631,24 @@ def transaction_update(request, transaction_id):
     if denied:
         return denied
     body = parse_body(request)
-    txn = (
-        TransactionFund.objects.select_related("database")
-        .filter(id=transaction_id, database__is_deleted=False)
-        .first()
-    )
+    txn = _get_txn(transaction_id)
     if not txn:
         return json_error("Transaction not found", 404)
     if txn.is_voided:
         return json_error("Cannot edit a voided transaction", 400)
 
-    # Validate any amount/date supplied in the body before taking the fund
-    # lock. The values actually written for fields the body omits are
-    # resolved from the fresh, locked row below -- not from this pre-lock
-    # read -- so a racing edit to one of those fields is never clobbered.
-    if "amount" in body:
-        amount_error = _amount_error(round(parse_number(body["amount"]) or 0, 2))
+    # Parsed once, before the fund lock, and reused below rather than
+    # re-parsed inside it. The values actually written for fields the body
+    # omits are resolved from the fresh, locked row below -- not from this
+    # pre-lock read -- so a racing edit to one of those fields is never
+    # clobbered.
+    new_amount = round(parse_number(body["amount"]) or 0, 2) if "amount" in body else None
+    if new_amount is not None:
+        amount_error = _amount_error(new_amount)
         if amount_error:
             return amount_error
-    if "date" in body and _parse_iso_datetime(body.get("date")) is None:
+    new_date = _parse_iso_datetime(body.get("date")) if "date" in body else None
+    if "date" in body and new_date is None:
         return json_error("Transaction date is required", 400)
 
     try:
@@ -641,18 +672,14 @@ def transaction_update(request, transaction_id):
                 return json_error("Transaction not found", 404)
             if txn.is_voided:
                 return json_error("Cannot edit a voided transaction", 400)
-            amount = round(parse_number(body["amount"]) or 0, 2) if "amount" in body else txn.amount
-            tx_date = _parse_iso_datetime(body.get("date")) if "date" in body else txn.date
-            sender = str(body.get("sender", txn.sender or "")).strip() or None
-            receiver = str(body.get("receiver", txn.receiver or "")).strip() or None
-            location = str(body.get("location", txn.location or "")).strip() or None
-            notes = str(body.get("notes", txn.notes or "")).strip() or None
-            txn.amount = amount
-            txn.date = tx_date
-            txn.sender = sender
-            txn.receiver = receiver
-            txn.location = location
-            txn.notes = notes
+            txn.amount = new_amount if new_amount is not None else txn.amount
+            txn.date = new_date if "date" in body else txn.date
+            # An absent key keeps the current value; a present key -- including
+            # an explicit JSON null -- replaces or clears it.
+            txn.sender = _text_update(body, "sender", txn.sender)
+            txn.receiver = _text_update(body, "receiver", txn.receiver)
+            txn.location = _text_update(body, "location", txn.location)
+            txn.notes = _text_update(body, "notes", txn.notes)
             txn.save(update_fields=["amount", "date", "sender", "receiver", "location", "notes"])
             # Raising an approved debit's amount (or lowering an approved
             # credit's) can drive the fund negative with no other check --
@@ -665,9 +692,14 @@ def transaction_update(request, transaction_id):
             new_balance = recalculate_running_balances(txn.database_id)
             if new_balance < 0 and new_balance < fund.balance:
                 raise InsufficientBalance()
+            # recalculate_running_balances writes this row's running_balance
+            # via a queryset .bulk_update(), which never touches this
+            # in-memory `txn` -- without this, the response below would still
+            # carry its pre-edit running_balance.
+            txn.refresh_from_db(fields=["running_balance"])
+            add_audit(request.fv_user.id, "update", "transaction", txn.id, "Transaction edited")
     except InsufficientBalance:
         return json_error("Insufficient balance for this change", 400)
-    add_audit(request.fv_user.id, "update", "transaction", txn.id, "Transaction edited")
     return JsonResponse(serialize_transaction(txn, _storage_for(request)))
 
 
@@ -754,7 +786,12 @@ def _delete_trash_item_permanently(request, item):
                 _delete_receipts_on_commit(request, txns.values_list("receipt_key", flat=True))
                 RecurringTransaction.objects.filter(database_id=db_id).delete()
                 txns.delete()
-                fund.delete()
+                fund_id, fund_name = fund.id, fund.name
+                fund.delete()  # clears fund.id -- read it above, not after
+                add_audit(
+                    request.fv_user.id, "delete", "database", fund_id,
+                    f'Database "{fund_name}" permanently deleted',
+                )
         item.delete()
 
 
@@ -773,16 +810,20 @@ def trash_restore(request, item_id):
     if not item:
         return json_error("Item not found", 404)
 
-    if item.entity_type == "database":
-        data = json.loads(item.entity_data)
-        restored = DatabaseFund.objects.filter(id=data.get("id")).update(is_deleted=False)
-        if not restored:
-            # A concurrent purge already hard-deleted the fund.
-            item.delete()
-            return json_error("Item not found", 404)
+    entity_id, message = item.id, "Item restored from trash"
+    with transaction.atomic(using=current_org_alias()):
+        if item.entity_type == "database":
+            data = json.loads(item.entity_data)
+            restored = DatabaseFund.objects.filter(id=data.get("id")).update(is_deleted=False)
+            if not restored:
+                # A concurrent purge already hard-deleted the fund.
+                item.delete()
+                return json_error("Item not found", 404)
+            entity_id = data.get("id")
+            message = f'Database "{data.get("name", "")}" restored from trash'
 
-    item.delete()
-    add_audit(request.fv_user.id, "update", item.entity_type, item.id, "Item restored from trash")
+        item.delete()
+        add_audit(request.fv_user.id, "update", item.entity_type, entity_id, message)
     return JsonResponse({"success": True})
 
 
@@ -827,7 +868,7 @@ def recurring_list_create(request, database_id):
     tx_type = str(body.get("type", "")).strip()
     amount = round(parse_number(body.get("amount")) or 0, 2)
     frequency = str(body.get("frequency", "")).strip()
-    description = str(body.get("description", "")).strip()
+    description = _text(body, "description")
     next_run = body.get("nextRun")
 
     if tx_type not in ("credit", "debit"):
@@ -867,15 +908,15 @@ def recurring_delete(request, recurring_id):
     denied = require(request.fv_user, Action.MANAGE_FUNDS)
     if denied:
         return denied
-    item = (
-        RecurringTransaction.objects.select_related("database")
-        .filter(id=recurring_id)
-        .first()
-    )
+    item = RecurringTransaction.objects.filter(id=recurring_id).first()
     if not item:
         return json_error("Recurring transaction not found", 404)
     item.is_active = False
     item.save(update_fields=["is_active"])
+    add_audit(
+        request.fv_user.id, "delete", "recurring", item.id,
+        f"Recurring {item.type} of ₹{item.amount} ({item.frequency}) deleted",
+    )
     return JsonResponse({"success": True})
 
 
@@ -897,7 +938,7 @@ def recurring_process(request):
 @csrf_exempt
 @auth_required
 def extract_receipt(request):
-    """Extract transaction data from a receipt / screenshot image using Gemini Vision."""
+    """Extract transaction data from a receipt / screenshot image using the org's configured AI provider(s)."""
     if request.method != "POST":
         return json_error("Method not allowed", 405)
 
@@ -905,11 +946,9 @@ def extract_receipt(request):
     if denied:
         return denied
 
-    image_file = request.FILES.get("image")
-    if not image_file:
-        return json_error("No image file provided", 400)
-    if image_file.size > 5 * 1024 * 1024:
-        return json_error("Image must be less than 5 MB", 400)
+    image_file, error = _uploaded_image_or_error(request)
+    if error:
+        return error
 
     from apps.ledger.receipt_extractor import extract_from_receipt_image, parse_ai_config
 
@@ -922,8 +961,9 @@ def extract_receipt(request):
             },
             status=503,
         )
-    result = extract_from_receipt_image(image_file.read(), image_file.content_type or "", config)
-    return JsonResponse(result)
+    result = extract_from_receipt_image(image_file.read(), config)
+    status = 502 if "error" in result else 200
+    return JsonResponse(result, status=status)
 
 
 @csrf_exempt
@@ -949,15 +989,23 @@ def transaction_receipt(request, transaction_id):
     # Validate the upload itself before touching storage: a bad request
     # (missing/oversized/undecodable file) is a 400 regardless of whether
     # this org even has storage configured, so that check runs first.
-    upload = request.FILES.get("image")
-    if not upload:
-        return json_error("No image file provided", 400)
-    if upload.size > 5 * 1024 * 1024:
-        return json_error("Image must be less than 5 MB", 400)
+    upload, error = _uploaded_image_or_error(request)
+    if error:
+        return error
 
-    txn = TransactionFund.objects.filter(id=transaction_id, database__is_deleted=False).first()
+    txn = _get_txn(transaction_id)
     if not txn:
         return json_error("Transaction not found", 404)
+    # The object key is deterministic (fund + transaction id), so without this
+    # any CREATE_TXN holder could overwrite the receipt of someone else's
+    # transaction -- including an already-approved or voided one.
+    if txn.created_by_id != request.fv_user.id:
+        denied = require(request.fv_user, Action.MODIFY_TXN)
+        if denied:
+            return denied
+    fund = _get_fund(txn.database_id)
+    if fund and fund.is_archived:
+        return json_error("This fund is archived", 400)
 
     raw = upload.read()
     try:

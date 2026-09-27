@@ -90,6 +90,43 @@ class ReceiptUploadTests(OrgTestMixin, TestCase):
         response = self._upload(_png())
         self.assertEqual(response.status_code, 403)
 
+    def test_member_cannot_overwrite_another_users_receipt(self):
+        # t1 was created by u1 (an Admin). A Member who did not create it has
+        # no ownership bypass and lacks MODIFY_TXN, so the deterministic
+        # object key must not let them overwrite someone else's receipt.
+        member_token = self.make_user("u2", User.Role.MEMBER, username="bob", email="b@example.com")
+        response = self.client.post(
+            "/api/transactions/t1/receipt",
+            data={"image": _png()},
+            HTTP_AUTHORIZATION=f"Bearer {member_token}",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    @mock.patch("apps.ledger.storage._client")
+    def test_creator_can_overwrite_their_own_receipt(self, mock_client_factory):
+        fake_client = mock.Mock()
+        fake_client.generate_presigned_url.return_value = "https://signed.example.com/x"
+        mock_client_factory.return_value = fake_client
+        self.org.storage_config = STORAGE_CONFIG
+        self.org.save(update_fields=["storage_config"])
+
+        member_token = self.make_user("u2", User.Role.MEMBER, username="bob", email="b@example.com")
+        with org_context(ORG_ALIAS):
+            TransactionFund.objects.filter(id="t1").update(created_by_id="u2")
+        response = self.client.post(
+            "/api/transactions/t1/receipt",
+            data={"image": _png()},
+            HTTP_AUTHORIZATION=f"Bearer {member_token}",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+
+    def test_receipt_upload_denied_for_an_archived_fund(self):
+        with org_context(ORG_ALIAS):
+            DatabaseFund.objects.filter(id="f1").update(is_archived=True)
+        response = self._upload(_png())
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "This fund is archived")
+
     @mock.patch("apps.ledger.storage._client")
     def test_successful_upload_round_trip_stores_key_and_returns_signed_url(self, mock_client_factory):
         # Task 20 left no live S3 to test against, so the boto3 client itself
