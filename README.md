@@ -13,6 +13,8 @@ Postgres it connected.
 - **Multi-tenant by database** — each org supplies its own `postgres://` connection; there is no shared tenant table
 - **Organisation onboarding** — create an org (validates the connection, migrates it, makes you Owner) or join one with a code
 - **Role-based access control** — Owner / Admin / Member / Viewer, see [Roles](#roles) below
+- **Join codes** — Owners and Admins mint expiring, use-limited codes (`FUNDVAULT-XXXX-XXXX`) that grant a role; revocable from the app
+- **Organisation lifecycle** — an Owner can transfer ownership, repoint the org at a different Postgres (provider migration — schema is applied, data is not copied), or delete the org (only the control-plane record is removed; the org's own database is never touched)
 - **Fund management** — create, archive, merge, and manage multiple fund accounts per org
 - **Ledger management** — transactions with running balances, void/edit, and an approval workflow for Member-created transactions over a threshold
 - **Receipts** — upload a receipt image to an org's own S3-compatible bucket; read access is via a signed URL valid for one hour
@@ -21,6 +23,7 @@ Postgres it connected.
 - **Trash management** — soft delete with recovery capability
 - **Recurring transactions** — scheduled transactions processed on demand
 - **Analytics** — dashboard totals across an org's funds
+- **Reports** — PDF export and printable ledgers
 
 ## Tech Stack
 
@@ -58,6 +61,13 @@ postgres://fundvault:devpassword@127.0.0.1:5434/fundvault_tenant_dev
 
 Use `127.0.0.1`, not `localhost`: in development the SSRF guard allows exactly
 `127.0.0.1:5433` and `127.0.0.1:5434`.
+
+Run the backend test suite (with the dev databases up):
+
+```bash
+cd backend
+python manage.py test --settings=fundvault_backend.settings_test
+```
 
 For full setup instructions, see [docs/development.md](docs/development.md).
 
@@ -102,7 +112,7 @@ FundVault/
 ├── package.json                  # Root workspace scripts
 ├── install.bat                   # Windows installation
 ├── run.bat                       # Windows launcher
-├── LICENSE
+├── LICENSE.txt
 └── README.md
 ```
 
@@ -122,7 +132,7 @@ Every member of an organisation holds exactly one role:
 | Mint Member / Viewer join codes · manage members | ✓ | ✓ | — | — |
 | Mint Admin join codes | ✓ | — | — | — |
 | Change role of a member | ✓ | — | — | — |
-| Set database connection, storage, AI config | ✓ | — | — | — |
+| Set database connection, storage, AI config · delete the organisation | ✓ | — | — | — |
 | Transfer ownership | ✓ | — | — | — |
 
 An org always has exactly one Owner. The Owner cannot be demoted or removed
@@ -145,6 +155,21 @@ FundVault has no shared infrastructure — you supply:
 
 All three are configured per-organisation from the org settings page.
 
+## Deployment
+
+FundVault runs as a Render web service (API), a Vercel project (frontend), and
+Postgres databases you own. The full walkthrough is in
+[docs/deployment.md](docs/deployment.md); the short version:
+
+1. **Control-plane Postgres** — create one that never expires (Neon, or a paid Render Postgres). Render's free Postgres is deleted after 30 days, which would orphan every organisation.
+2. **Encryption key** — generate `FUNDVAULT_SECRET_KEY` (command above) and store it in a password manager. It must never change once organisations exist.
+3. **Backend on Render** — New → Blueprint from this repo (`render.yaml`). Set `DATABASE_URL`, `FUNDVAULT_SECRET_KEY` and `CORS_ALLOWED_ORIGINS`; the API refuses to boot without them.
+4. **Frontend on Vercel** — Root Directory `frontend`, with `NEXT_PUBLIC_API_BASE` set to the Render URL (no trailing slash). Then set Render's `CORS_ALLOWED_ORIGINS` to the Vercel URL (full URL, no trailing slash).
+5. **First organisation** — open the Vercel URL, choose *Create organisation*, and paste the org's own Postgres connection string.
+
+The free Render plan sleeps after 15 idle minutes, so the first request after a
+pause can take about a minute.
+
 ## Documentation
 
 The [documentation index](docs/README.md) lists every document.
@@ -162,8 +187,8 @@ The [documentation index](docs/README.md) lists every document.
 
 ## License
 
-This project is licensed under the MIT License — see the LICENSE file for
-details.
+This project is licensed under the MIT License — see [LICENSE.txt](LICENSE.txt)
+for details.
 
 ## Authors
 
